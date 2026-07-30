@@ -1,0 +1,61 @@
+{
+  "checkedAt": "2026-07-26T12:17:36.527Z",
+  "checks": [
+    {
+      "id": "SYNC-STRUCT-001",
+      "description": "migração incremental existe",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-002",
+      "description": "estado remoto possui revisão",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-003",
+      "description": "gravação usa comparação atômica da revisão",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-004",
+      "description": "upsert cego foi removido",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-005",
+      "description": "conflito remoto possui erro próprio",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-006",
+      "description": "hash usa serialização canônica",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-007",
+      "description": "interface possui modal de conflito",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-008",
+      "description": "interface oferece backup local",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-009",
+      "description": "banco exige incremento unitário",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-010",
+      "description": "testes de decisão existem",
+      "passed": true
+    },
+    {
+      "id": "SYNC-STRUCT-011",
+      "description": "testes de compare-and-swap existem",
+      "passed": true
+    }
+  ],
+  "failed": 0
+}

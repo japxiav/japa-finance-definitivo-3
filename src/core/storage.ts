@@ -1,0 +1,853 @@
+import type { AppState, Category, ImportIssue, ReviewDecision, ReviewGroup, SyncMetadata, TechnicalMovementType, Transaction } from './types';
+import { canAddCents } from '../domain/arithmetic';
+import { civilDateFromUtcInstant, civilDaysBetween, isCivilDate } from '../domain/dates';
+import { localCivilDateFromInstant } from './date';
+import { isTransactionKindDirectionCompatible } from './finance';
+import { buildReviewGroups } from '../classification/grouping';
+import {
+  identifyTechnicalMovement,
+  isCategoryReviewApplicable,
+  isTechnicalTypeDirectionCompatible,
+  kindForTechnicalType,
+} from '../classification/technicalClassifier';
+
+const CACHE_PREFIX = 'japa-finance-v0.3';
+const CHECKPOINT_PREFIX = 'japa-finance-checkpoints-v0.3';
+const SYNC_METADATA_PREFIX = 'japa-finance-sync-v0.4';
+
+function cacheKey(userId: string) {
+  return `${CACHE_PREFIX}:${userId}`;
+}
+
+function checkpointKey(userId: string) {
+  return `${CHECKPOINT_PREFIX}:${userId}`;
+}
+
+function syncMetadataKey(userId: string) {
+  return `${SYNC_METADATA_PREFIX}:${userId}`;
+}
+
+function migrateV2(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const transactions = Array.isArray(candidate.transactions)
+    ? (candidate.transactions as Transaction[]).map((transaction) => ({
+      ...transaction,
+      source: transaction.source === 'manual'
+        ? 'manual' as const
+        : transaction.source === 'wise_csv'
+          ? 'wise_csv' as const
+          : 'revolut_csv' as const,
+      categorySource: transaction.categorySource === 'manual'
+        ? 'manual' as const
+        : transaction.categorySource === 'rule'
+          ? 'rule' as const
+          : transaction.categoryId === 'income'
+            ? 'system' as const
+            : 'none' as const,
+    }))
+    : [];
+
+  const oldAccounts = Array.isArray(candidate.accounts)
+    ? candidate.accounts as AppState['accounts']
+    : [];
+  const accounts = [
+    ...fallback.accounts.map((defaultAccount) => {
+      const old = oldAccounts.find((item) => item.id === defaultAccount.id);
+      return old ? { ...defaultAccount, ...old, institution: defaultAccount.institution } : defaultAccount;
+    }),
+    ...oldAccounts.filter((old) => !fallback.accounts.some((item) => item.id === old.id)),
+  ];
+
+  return {
+    schemaVersion: 4,
+    accounts,
+    transactions,
+    imports: Array.isArray(candidate.imports) ? candidate.imports : [],
+    importIssues: [],
+    categories: Array.isArray(candidate.categories) ? candidate.categories : fallback.categories,
+    rules: Array.isArray(candidate.rules) ? candidate.rules : fallback.rules,
+    balanceSnapshots: [],
+    reservePolicies: [],
+    plannedEvents: [],
+    reconciliationBatches: [],
+    plannedTransfers: [],
+  };
+}
+
+const CATEGORY_REMAP: Record<string, string> = {
+  clothing: 'shopping',
+  games: 'shopping',
+};
+
+function mergeCategories(current: Category[], fallback: Category[]): Category[] {
+  const migrated: Category[] = current
+    .filter((category) => !(category.id in CATEGORY_REMAP))
+    .map((category) => ({
+      ...category,
+      type: category.type ?? (category.id === 'income' ? 'income' : 'expense'),
+      system: category.system ?? fallback.some((item) => item.id === category.id && item.system),
+    }));
+  const ids = new Set(migrated.map((item) => item.id));
+  for (const category of fallback) {
+    if (!ids.has(category.id)) migrated.push({ ...category });
+  }
+  return migrated;
+}
+
+function migrateV4(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const categories = mergeCategories(
+    Array.isArray(candidate.categories) ? candidate.categories as Category[] : [],
+    fallback.categories,
+  );
+  const categoryIds = new Set(categories.map((item) => item.id));
+  const now = new Date().toISOString();
+  const rules: AppState['rules'] = (Array.isArray(candidate.rules) ? candidate.rules as AppState['rules'] : [])
+    .map((rule) => ({
+      ...rule,
+      categoryId: CATEGORY_REMAP[rule.categoryId] ?? rule.categoryId,
+      source: rule.source ?? ('default' as const),
+    }))
+    .filter((rule) => categoryIds.has(rule.categoryId));
+  const rulePatterns = new Set(rules.map((rule) => `${rule.kind}:${rule.pattern.toLocaleLowerCase('en-IE')}`));
+  for (const rule of fallback.rules) {
+    const key = `${rule.kind}:${rule.pattern.toLocaleLowerCase('en-IE')}`;
+    if (!rulePatterns.has(key)) rules.push({ ...rule, createdAt: rule.createdAt ?? now, updatedAt: rule.updatedAt ?? now });
+  }
+  return {
+    ...(candidate as unknown as Omit<AppState, 'schemaVersion' | 'categories' | 'rules' | 'transactions' | 'insightFeedback'>),
+    schemaVersion: 5,
+    categories,
+    rules,
+    transactions: (Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : []).map((transaction) => ({
+      ...transaction,
+      categoryId: transaction.categoryId ? (CATEGORY_REMAP[transaction.categoryId] ?? transaction.categoryId) : transaction.categoryId,
+    })),
+    insightFeedback: [],
+  };
+}
+
+function migrateV5(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const categories = mergeCategories(
+    (Array.isArray(candidate.categories) ? candidate.categories as Category[] : [])
+      .filter((category) => category.id !== 'uncategorized'),
+    fallback.categories,
+  ).filter((category) => category.id !== 'uncategorized');
+  const categoryIds = new Set(categories.map((category) => category.id));
+  const transactions = oldTransactions.map((transaction) => {
+    const remapped = transaction.categoryId ? (CATEGORY_REMAP[transaction.categoryId] ?? transaction.categoryId) : undefined;
+    const categoryId = transaction.kind === 'transfer' || remapped === 'uncategorized' || !remapped || !categoryIds.has(remapped) ? undefined : remapped;
+    const reviewReasons = Array.isArray(transaction.reviewReasons)
+      ? transaction.reviewReasons.filter((reason) => reason !== 'uncategorized')
+      : [];
+    return {
+      ...transaction,
+      categoryId,
+      categorySource: categoryId
+        ? transaction.categorySource === 'manual'
+          ? 'manual' as const
+          : transaction.categorySource === 'rule'
+            ? 'rule' as const
+            : 'system' as const
+        : 'none' as const,
+      reviewReasons,
+      needsReview: reviewReasons.length > 0,
+    };
+  });
+  const rules = (Array.isArray(candidate.rules) ? candidate.rules as AppState['rules'] : [])
+    .filter((rule) => rule.categoryId !== 'uncategorized' && categoryIds.has(rule.categoryId))
+    .map((rule) => ({ ...rule, active: rule.active ?? true, exceptionTransactionIds: rule.exceptionTransactionIds ?? [] }));
+  return {
+    ...(candidate as unknown as Omit<AppState, 'schemaVersion' | 'transactions' | 'categories' | 'rules' | 'reviewGroups' | 'reviewDecisions'>),
+    schemaVersion: 6,
+    transactions,
+    categories,
+    rules,
+    reviewGroups: [],
+    reviewDecisions: [],
+  };
+}
+
+
+const TECHNICAL_TYPES: TechnicalMovementType[] = [
+  'salary', 'other_income', 'card_payment', 'cash_withdrawal', 'direct_debit', 'bank_fee',
+  'other_expense', 'refund', 'incoming_transfer', 'outgoing_transfer', 'internal_transfer',
+  'currency_conversion', 'adjustment', 'unknown',
+];
+
+function inferTechnicalType(transaction: Transaction): TechnicalMovementType {
+  const identified = identifyTechnicalMovement({
+    bankType: transaction.bankType,
+    description: transaction.descriptionOriginal,
+    direction: transaction.direction,
+  }).technicalType;
+  if (identified === 'internal_transfer' || identified === 'currency_conversion') return identified;
+  if (transaction.kind === 'transfer') {
+    return transaction.direction === 'inflow' ? 'incoming_transfer' : 'outgoing_transfer';
+  }
+  if (transaction.kind === 'income') return identified === 'salary' ? 'salary' : 'other_income';
+  if (transaction.kind === 'expense') {
+    return ['card_payment', 'cash_withdrawal', 'direct_debit', 'bank_fee', 'other_expense'].includes(identified)
+      ? identified
+      : 'other_expense';
+  }
+  if (transaction.kind === 'refund') return 'refund';
+  if (transaction.kind === 'adjustment') return 'adjustment';
+  // Versões antigas podiam deixar como desconhecido algo cujo tipo bancário
+  // já contém informação suficiente. A migração aproveita essa evidência em
+  // vez de obrigar o usuário a corrigir linha por linha outra vez.
+  if (identified !== 'unknown') return identified;
+  return 'unknown';
+}
+
+function migrateV6(candidate: Record<string, unknown>): AppState {
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const categories = (Array.isArray(candidate.categories) ? candidate.categories as Category[] : [])
+    .map((category) => category.id === 'family' && category.system
+      ? { ...category, type: 'both' as const }
+      : category);
+  const deferredIds = new Set(
+    (Array.isArray(candidate.reviewGroups) ? candidate.reviewGroups as ReviewGroup[] : [])
+      .filter((group) => group.status === 'deferred')
+      .flatMap((group) => group.transactionIds),
+  );
+  const transactions = oldTransactions.map((transaction) => {
+    const technicalType = inferTechnicalType(transaction);
+    const kind = kindForTechnicalType(technicalType);
+    const reviewReasons = Array.isArray(transaction.reviewReasons)
+      ? transaction.reviewReasons.filter((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer')
+      : [];
+    if (technicalType === 'unknown' && !reviewReasons.includes('unknown_kind')) reviewReasons.push('unknown_kind');
+    if (technicalType !== 'unknown') {
+      const index = reviewReasons.indexOf('unknown_kind');
+      if (index >= 0) reviewReasons.splice(index, 1);
+    }
+    const categoryId = isCategoryReviewApplicable(technicalType) ? transaction.categoryId : undefined;
+    const categoryReviewStatus = categoryId
+      ? 'resolved' as const
+      : !isCategoryReviewApplicable(technicalType)
+        ? 'not_applicable' as const
+        : deferredIds.has(transaction.id)
+          ? 'deferred' as const
+          : 'pending' as const;
+    const analysisExcluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
+    return {
+      ...transaction,
+      kind,
+      technicalType,
+      analysisExcluded,
+      transferGroupId: analysisExcluded ? (transaction.transferGroupId ?? `migrated-internal:${transaction.id}`) : undefined,
+      categoryId,
+      categorySource: categoryId ? transaction.categorySource : 'none' as const,
+      categoryReviewStatus,
+      reviewReasons,
+      needsReview: reviewReasons.length > 0,
+    };
+  });
+  const transactionById = new Map(transactions.map((item) => [item.id, item]));
+  const reviewDecisions = (Array.isArray(candidate.reviewDecisions) ? candidate.reviewDecisions as ReviewDecision[] : []).map((decision) => ({
+    ...decision,
+    before: decision.before.map((item) => ({
+      ...item,
+      categoryReviewStatus: item.categoryId
+        ? 'resolved' as const
+        : (transactionById.get(item.transactionId)?.categoryReviewStatus ?? 'pending'),
+    })),
+    after: decision.after.map((item) => ({
+      ...item,
+      categoryReviewStatus: item.categoryId
+        ? 'resolved' as const
+        : (transactionById.get(item.transactionId)?.categoryReviewStatus ?? 'pending'),
+    })),
+  }));
+  return {
+    ...(candidate as unknown as Omit<AppState, 'schemaVersion' | 'transactions' | 'categories' | 'reviewGroups' | 'reviewDecisions'>),
+    schemaVersion: 7,
+    transactions,
+    categories,
+    reviewGroups: [],
+    reviewDecisions,
+  };
+}
+
+export function normalizeState(raw: unknown, fallback: AppState): AppState {
+  if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
+  const candidate = raw as Record<string, unknown>;
+  if (candidate.schemaVersion === 2) {
+    return normalizeState(migrateV2(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion === 3) {
+    return normalizeState({
+      ...(candidate as object),
+      schemaVersion: 4,
+      balanceSnapshots: [],
+      reservePolicies: [],
+      plannedEvents: [],
+      reconciliationBatches: [],
+      plannedTransfers: [],
+    }, fallback);
+  }
+  if (candidate.schemaVersion === 4) {
+    return normalizeState(migrateV4(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion === 5) {
+    return normalizeState(migrateV5(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion === 6) {
+    return normalizeState(migrateV6(candidate), fallback);
+  }
+  if (candidate.schemaVersion !== 7) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+
+  candidate.reconciliationBatches ??= [];
+  candidate.plannedTransfers ??= [];
+  candidate.insightFeedback ??= [];
+  candidate.reviewGroups ??= [];
+  candidate.reviewDecisions ??= [];
+  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions'];
+  for (const key of requiredArrays) {
+    if (!Array.isArray(candidate[key])) throw new Error(`Backup inválido: ${key} não é uma lista`);
+  }
+
+  const state = candidate as unknown as AppState;
+  const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+  const canonicalTimestamp = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(value);
+    if (!match) return undefined;
+    const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw, millisecondRaw = '0'] = match;
+    const year = Number(yearRaw);
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    const hour = Number(hourRaw);
+    const minute = Number(minuteRaw);
+    const second = Number(secondRaw);
+    const millisecond = Number(millisecondRaw.padEnd(3, '0'));
+    if (hour > 23 || minute > 59 || second > 59) return undefined;
+    const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second, millisecond));
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day ||
+      date.getUTCHours() !== hour ||
+      date.getUTCMinutes() !== minute ||
+      date.getUTCSeconds() !== second ||
+      date.getUTCMilliseconds() !== millisecond
+    ) return undefined;
+    return date.toISOString();
+  };
+  const validTimestamp = (value: unknown) => canonicalTimestamp(value) !== undefined;
+  const oneOf = <T extends string>(value: unknown, allowed: readonly T[]): value is T =>
+    typeof value === 'string' && (allowed as readonly string[]).includes(value);
+
+  const accountIds = new Set<string>();
+  for (const account of state.accounts) {
+    if (!nonEmpty(account.id) || !nonEmpty(account.name) || !nonEmpty(account.currency)) {
+      throw new Error('Backup contém conta inválida');
+    }
+    if (accountIds.has(account.id)) throw new Error('Backup contém contas duplicadas');
+    accountIds.add(account.id);
+    if (typeof account.active !== 'boolean') throw new Error('Backup contém estado de conta inválido');
+    if (!oneOf(account.institution, ['revolut', 'wise', 'cash', 'other'] as const)) throw new Error('Backup contém instituição de conta inválida');
+  }
+  const accountById = new Map(state.accounts.map((account) => [account.id, account]));
+
+  const categoryIds = new Set<string>();
+  for (const category of state.categories) {
+    if (!nonEmpty(category.id) || categoryIds.has(category.id)) {
+      throw new Error('Backup contém categorias duplicadas ou sem ID');
+    }
+    categoryIds.add(category.id);
+    if (!nonEmpty(category.name) || typeof category.active !== 'boolean') {
+      throw new Error('Backup contém categoria inválida');
+    }
+    if (category.type !== undefined && !oneOf(category.type, ['expense', 'income', 'both', 'system'] as const)) {
+      throw new Error('Backup contém tipo de categoria inválido');
+    }
+    if (category.id === 'family' && category.system && category.type === 'expense') category.type = 'both';
+    if (category.icon !== undefined && !nonEmpty(category.icon)) throw new Error('Backup contém ícone de categoria inválido');
+    if (category.color !== undefined && !nonEmpty(category.color)) throw new Error('Backup contém cor de categoria inválida');
+    if (category.system !== undefined && typeof category.system !== 'boolean') throw new Error('Backup contém categoria de sistema inválida');
+    if (category.createdAt !== undefined) {
+      if (!validTimestamp(category.createdAt)) throw new Error('Backup contém criação de categoria inválida');
+      category.createdAt = canonicalTimestamp(category.createdAt)!;
+    }
+    if (category.archivedAt !== undefined) {
+      if (!validTimestamp(category.archivedAt)) throw new Error('Backup contém arquivamento de categoria inválido');
+      category.archivedAt = canonicalTimestamp(category.archivedAt)!;
+    }
+  }
+
+  const ruleIds = new Set<string>();
+  for (const rule of state.rules) {
+    if (!nonEmpty(rule.id) || ruleIds.has(rule.id)) throw new Error('Backup contém regras duplicadas ou sem ID');
+    ruleIds.add(rule.id);
+    if (!nonEmpty(rule.pattern) || !oneOf(rule.kind, ['exact', 'contains', 'starts_with'] as const)) {
+      throw new Error('Backup contém regra de categorização inválida');
+    }
+    if (!categoryIds.has(rule.categoryId)) throw new Error('Backup contém regra ligada a categoria inexistente');
+    if (!Number.isSafeInteger(rule.order) || rule.order < 0) throw new Error('Backup contém ordem de regra inválida');
+    if (rule.source !== undefined && !oneOf(rule.source, ['default', 'learned'] as const)) throw new Error('Backup contém origem de regra inválida');
+    if (rule.active !== undefined && typeof rule.active !== 'boolean') throw new Error('Backup contém estado de regra inválido');
+    rule.active ??= true;
+    if (rule.exceptionTransactionIds !== undefined && (!Array.isArray(rule.exceptionTransactionIds) || rule.exceptionTransactionIds.some((id) => !nonEmpty(id)))) {
+      throw new Error('Backup contém exceções de regra inválidas');
+    }
+    rule.exceptionTransactionIds ??= [];
+    if (rule.currency !== undefined && !nonEmpty(rule.currency)) throw new Error('Backup contém moeda de regra inválida');
+    if (rule.direction !== undefined && !oneOf(rule.direction, ['inflow', 'outflow'] as const)) throw new Error('Backup contém direção de regra inválida');
+    if (rule.transactionKind !== undefined && !oneOf(rule.transactionKind, ['income', 'expense', 'transfer', 'refund', 'adjustment', 'unknown'] as const)) throw new Error('Backup contém natureza financeira de regra inválida');
+    if (rule.technicalType !== undefined && !oneOf(rule.technicalType, TECHNICAL_TYPES)) throw new Error('Backup contém tipo técnico de regra inválido');
+    if (rule.merchantLabel !== undefined && !nonEmpty(rule.merchantLabel)) throw new Error('Backup contém rótulo de comerciante inválido');
+    if (rule.createdAt !== undefined) {
+      if (!validTimestamp(rule.createdAt)) throw new Error('Backup contém criação de regra inválida');
+      rule.createdAt = canonicalTimestamp(rule.createdAt)!;
+    }
+    if (rule.updatedAt !== undefined) {
+      if (!validTimestamp(rule.updatedAt)) throw new Error('Backup contém atualização de regra inválida');
+      rule.updatedAt = canonicalTimestamp(rule.updatedAt)!;
+    }
+  }
+
+  const transactionIds = new Set<string>();
+  for (const transaction of state.transactions) {
+    if (!nonEmpty(transaction.id) || transactionIds.has(transaction.id)) throw new Error('Backup contém transações duplicadas ou sem ID');
+    transactionIds.add(transaction.id);
+    const transactionAccount = accountById.get(transaction.accountId);
+    if (!transactionAccount) throw new Error(`Transação aponta para conta inexistente: ${transaction.accountId}`);
+    if (transactionAccount.currency !== transaction.currency) throw new Error('Backup contém transação em moeda incompatível com a conta');
+    if (!nonEmpty(transaction.dedupFingerprint) || !nonEmpty(transaction.descriptionOriginal) || !nonEmpty(transaction.merchantNormalized)) {
+      throw new Error('Backup contém metadados obrigatórios de transação inválidos');
+    }
+    if (transaction.categoryId !== undefined && (!nonEmpty(transaction.categoryId) || !categoryIds.has(transaction.categoryId))) {
+      throw new Error('Backup contém transação ligada a categoria inexistente');
+    }
+    if (!Number.isSafeInteger(transaction.amountCents) || transaction.amountCents < 0) throw new Error('Backup contém valor monetário inválido');
+    if (!oneOf(transaction.direction, ['inflow', 'outflow'] as const)) throw new Error('Backup contém direção de transação inválida');
+    if (!oneOf(transaction.kind, ['income', 'expense', 'transfer', 'refund', 'adjustment', 'unknown'] as const)) throw new Error('Backup contém natureza financeira inválida');
+    if (!oneOf(transaction.technicalType, TECHNICAL_TYPES)) throw new Error('Backup contém tipo técnico de transação inválido');
+    if (transaction.kind !== kindForTechnicalType(transaction.technicalType)) throw new Error('Backup contém tipo técnico incoerente com a natureza financeira');
+    if (!oneOf(transaction.status, ['completed', 'pending', 'voided', 'merged'] as const)) throw new Error('Backup contém status de transação inválido');
+    if (!oneOf(transaction.source, ['revolut_csv', 'wise_csv', 'revolut_pdf', 'manual'] as const)) throw new Error('Backup contém origem de transação inválida');
+    if (!oneOf(transaction.kindSource, ['bank', 'manual', 'rule', 'system', 'unknown'] as const)) throw new Error('Backup contém origem de classificação inválida');
+    if (!oneOf(transaction.categorySource, ['manual', 'rule', 'system', 'none'] as const)) throw new Error('Backup contém origem de categoria inválida');
+    if (!oneOf(transaction.categoryReviewStatus, ['pending', 'deferred', 'resolved', 'not_applicable'] as const)) throw new Error('Backup contém estado de revisão de categoria inválido');
+    if (!transaction.categoryId && transaction.categorySource !== 'none') throw new Error('Backup contém categoria ausente com origem incompatível');
+    if (transaction.categoryId && transaction.categorySource === 'none') throw new Error('Backup contém categoria definida sem origem');
+    if (transaction.categoryId && transaction.categoryReviewStatus !== 'resolved') throw new Error('Backup contém categoria definida ainda pendente de revisão');
+    if ((transaction.categoryReviewStatus === 'pending' || transaction.categoryReviewStatus === 'deferred') && transaction.categoryId) throw new Error('Backup contém revisão pendente já categorizada');
+    if (!isCategoryReviewApplicable(transaction.technicalType)) {
+      transaction.categoryId = undefined;
+      transaction.categorySource = 'none';
+      transaction.categoryReviewStatus = 'not_applicable';
+    }
+    const excludedByType = transaction.technicalType === 'internal_transfer' || transaction.technicalType === 'currency_conversion';
+    transaction.analysisExcluded = excludedByType;
+    if (excludedByType && !transaction.transferGroupId) transaction.transferGroupId = `restored-internal:${transaction.id}`;
+    if (!excludedByType) transaction.transferGroupId = undefined;
+    if (!isTransactionKindDirectionCompatible(transaction.kind, transaction.direction)
+      || !isTechnicalTypeDirectionCompatible(transaction.technicalType, transaction.direction)) throw new Error('Backup contém tipo incompatível com a direção da transação');
+    if (transaction.netMovementCents !== undefined && !Number.isSafeInteger(transaction.netMovementCents)) throw new Error('Backup contém movimento líquido inválido');
+    if (transaction.netMovementCents !== undefined && ((transaction.direction === 'inflow' && transaction.netMovementCents < 0) || (transaction.direction === 'outflow' && transaction.netMovementCents > 0))) {
+      throw new Error('Backup contém movimento líquido incompatível com a direção da transação');
+    }
+    if (transaction.feeCents !== undefined && (!Number.isSafeInteger(transaction.feeCents) || transaction.feeCents < 0)) throw new Error('Backup contém taxa inválida');
+    if (!isCivilDate(transaction.reportingDate)) throw new Error('Backup contém data contábil inválida');
+    if (transaction.startedAt !== undefined) {
+      const normalized = canonicalTimestamp(transaction.startedAt);
+      if (!normalized) throw new Error('Backup contém início de transação inválido');
+      transaction.startedAt = normalized;
+    }
+    if (transaction.completedAt !== undefined) {
+      const normalized = canonicalTimestamp(transaction.completedAt);
+      if (!normalized) throw new Error('Backup contém conclusão de transação inválida');
+      transaction.completedAt = normalized;
+    }
+    if (!validTimestamp(transaction.createdAt) || !validTimestamp(transaction.updatedAt)) throw new Error('Backup contém timestamps de transação inválidos');
+    transaction.createdAt = canonicalTimestamp(transaction.createdAt)!;
+    transaction.updatedAt = canonicalTimestamp(transaction.updatedAt)!;
+    if (transaction.updatedAt < transaction.createdAt) throw new Error('Backup contém transação atualizada antes da criação');
+    if (!Array.isArray(transaction.manualEditLog) || !transaction.originalData || typeof transaction.originalData !== 'object' || Array.isArray(transaction.originalData)) {
+      throw new Error('Backup contém trilha de auditoria de transação inválida');
+    }
+    for (const edit of transaction.manualEditLog) {
+      if (!nonEmpty(edit.field) || !validTimestamp(edit.editedAt)) throw new Error('Backup contém edição manual inválida');
+      edit.editedAt = new Date(edit.editedAt).toISOString();
+      if (edit.editedAt < transaction.createdAt || edit.editedAt > transaction.updatedAt) {
+        throw new Error('Backup contém edição manual fora da linha temporal da transação');
+      }
+    }
+    if (transaction.startedAt !== undefined && !validTimestamp(transaction.startedAt)) throw new Error('Backup contém início de transação inválido');
+    if (transaction.completedAt !== undefined && !validTimestamp(transaction.completedAt)) throw new Error('Backup contém conclusão de transação inválida');
+    if (transaction.startedAt && transaction.completedAt && Date.parse(transaction.completedAt) < Date.parse(transaction.startedAt)) {
+      throw new Error('Backup contém transação concluída antes de começar');
+    }
+    if (transaction.feeTreatment !== undefined && !oneOf(transaction.feeTreatment, ['INCLUDED_IN_REPORTED_AMOUNT', 'ADDITIONAL_TO_REPORTED_AMOUNT'] as const)) {
+      throw new Error('Backup contém tratamento de taxa inválido');
+    }
+    const allowedReviewReasons = new Set([
+      'uncategorized', 'unknown_kind', 'possible_duplicate', 'zero_amount',
+      'unverified_fee', 'ambiguous_transfer', 'unlinked_refund',
+    ]);
+    if (!Array.isArray(transaction.reviewReasons) || transaction.reviewReasons.some((reason) => !allowedReviewReasons.has(reason))) {
+      throw new Error('Backup contém motivos de revisão inválidos');
+    }
+    transaction.reviewReasons = [...new Set(transaction.reviewReasons.filter((reason) => reason !== 'ambiguous_transfer' && reason !== 'uncategorized'))];
+    if (transaction.technicalType === 'unknown' && !transaction.reviewReasons.includes('unknown_kind')) transaction.reviewReasons.push('unknown_kind');
+    if (transaction.technicalType !== 'unknown') transaction.reviewReasons = transaction.reviewReasons.filter((reason) => reason !== 'unknown_kind');
+    transaction.needsReview = transaction.reviewReasons.length > 0;
+  }
+
+  const importIds = new Set<string>();
+  for (const batch of state.imports) {
+    if (!nonEmpty(batch.id) || importIds.has(batch.id)) throw new Error('Backup contém importações duplicadas ou sem ID');
+    importIds.add(batch.id);
+    const account = accountById.get(batch.accountId);
+    if (!account) throw new Error('Backup contém importação ligada a conta inexistente');
+    if (!nonEmpty(batch.fileName) || !nonEmpty(batch.fileHash) || !nonEmpty(batch.parserVersion)) {
+      throw new Error('Backup contém metadados de importação inválidos');
+    }
+    if (!oneOf(batch.parserName, ['revolut_csv', 'wise_csv', 'revolut_pdf'] as const) || !oneOf(batch.status, ['active', 'undone'] as const)) {
+      throw new Error('Backup contém estado de importação inválido');
+    }
+    if (!validTimestamp(batch.createdAt)) throw new Error('Backup contém data de importação inválida');
+    batch.createdAt = canonicalTimestamp(batch.createdAt)!;
+    const counters = [batch.rowsRead, batch.imported, batch.confirmedDuplicates, batch.possibleDuplicates, batch.pendingRows, batch.rejected];
+    if (counters.some((value) => !Number.isSafeInteger(value) || value < 0 || value > batch.rowsRead)) {
+      throw new Error('Backup contém contadores de importação inválidos');
+    }
+    if (!Array.isArray(batch.currencies) || batch.currencies.some((currency) => !nonEmpty(currency)) || new Set(batch.currencies).size !== batch.currencies.length) {
+      throw new Error('Backup contém moedas de importação inválidas');
+    }
+    if (batch.currencies.some((currency) => currency !== account.currency)) {
+      throw new Error('Backup contém importação em moeda incompatível com a conta');
+    }
+    if ((batch.firstReportingDate === undefined) !== (batch.lastReportingDate === undefined)) {
+      throw new Error('Backup contém intervalo parcial de importação');
+    }
+    if (batch.firstReportingDate !== undefined) {
+      if (!isCivilDate(batch.firstReportingDate) || !isCivilDate(batch.lastReportingDate) || batch.firstReportingDate > batch.lastReportingDate!) {
+        throw new Error('Backup contém intervalo de importação inválido');
+      }
+    }
+  }
+
+  for (const transaction of state.transactions) {
+    if (transaction.importId !== undefined && !importIds.has(transaction.importId)) {
+      throw new Error('Backup contém transação ligada a importação inexistente');
+    }
+  }
+
+  const issueIds = new Set<string>();
+  for (const issue of state.importIssues) {
+    if (!nonEmpty(issue.id) || issueIds.has(issue.id)) throw new Error('Backup contém pendências duplicadas ou sem ID');
+    issueIds.add(issue.id);
+    const batch = state.imports.find((item) => item.id === issue.importId);
+    const account = accountById.get(issue.accountId);
+    if (!batch || !account || batch.accountId !== issue.accountId) throw new Error('Backup contém pendência ligada a importação ou conta inválida');
+    if (!oneOf(issue.kind, ['row_error', 'pending', 'possible_duplicate', 'currency_mismatch', 'format_change'] as const)
+      || !oneOf(issue.status, ['unresolved', 'accepted', 'ignored'] as const)
+      || !nonEmpty(issue.message)) {
+      throw new Error('Backup contém pendência de importação inválida');
+    }
+    if (issue.rowNumber !== undefined && (!Number.isSafeInteger(issue.rowNumber) || issue.rowNumber <= 0)) {
+      throw new Error('Backup contém linha de pendência inválida');
+    }
+    if (!issue.originalData || typeof issue.originalData !== 'object' || Array.isArray(issue.originalData)) {
+      throw new Error('Backup contém dados originais de pendência inválidos');
+    }
+    if (!validTimestamp(issue.createdAt)) throw new Error('Backup contém criação de pendência inválida');
+    issue.createdAt = new Date(issue.createdAt).toISOString();
+    if (issue.status === 'unresolved') {
+      if (issue.resolvedAt !== undefined) throw new Error('Backup contém pendência não resolvida com data de resolução');
+    } else {
+      if (!validTimestamp(issue.resolvedAt) || new Date(issue.resolvedAt!).toISOString() < issue.createdAt) {
+        throw new Error('Backup contém resolução de pendência inválida');
+      }
+      issue.resolvedAt = new Date(issue.resolvedAt!).toISOString();
+    }
+    if (issue.matchedTransactionIds !== undefined && (!Array.isArray(issue.matchedTransactionIds)
+      || issue.matchedTransactionIds.some((id) => !nonEmpty(id)))) {
+      throw new Error('Backup contém referências de duplicata inválidas');
+    }
+  }
+
+  const batchIds = new Set<string>();
+  for (const batch of state.reconciliationBatches) {
+    if (!nonEmpty(batch.id) || batchIds.has(batch.id)) throw new Error('Backup contém lotes de reconciliação duplicados ou sem ID');
+    batchIds.add(batch.id);
+    if (!validTimestamp(batch.logicalAsOf) || !validTimestamp(batch.createdAt)) throw new Error('Backup contém instante de reconciliação inválido');
+    if (!oneOf(batch.source, ['manual', 'import', 'system'] as const) || !oneOf(batch.status, ['COMPLETE', 'INVALIDATED'] as const)) {
+      throw new Error('Backup contém lote de reconciliação com estado inválido');
+    }
+    batch.logicalAsOf = canonicalTimestamp(batch.logicalAsOf)!;
+    batch.createdAt = canonicalTimestamp(batch.createdAt)!;
+    if (batch.logicalDate === undefined) {
+      // Backups antigos só guardavam o instante UTC. A migração captura o dia
+      // civil no fuso do aparelho uma única vez e as novas gravações o preservam.
+      batch.logicalDate = localCivilDateFromInstant(batch.logicalAsOf);
+    } else if (!isCivilDate(batch.logicalDate)) {
+      throw new Error('Backup contém data civil de reconciliação inválida');
+    }
+    if (batch.logicalAsOf > batch.createdAt) throw new Error('Backup contém lote reconciliado no futuro');
+    const utcLogicalDate = civilDateFromUtcInstant(batch.logicalAsOf);
+    if (Math.abs(civilDaysBetween(utcLogicalDate, batch.logicalDate)) > 1) {
+      throw new Error('Backup contém data civil incoerente com o instante de reconciliação');
+    }
+  }
+
+  const batchById = new Map(state.reconciliationBatches.map((batch) => [batch.id, batch]));
+  const snapshotIds = new Set<string>();
+  const snapshotBatchAccounts = new Set<string>();
+  for (const snapshot of state.balanceSnapshots) {
+    if (!nonEmpty(snapshot.id) || snapshotIds.has(snapshot.id)) throw new Error('Backup contém snapshots duplicados ou sem ID');
+    snapshotIds.add(snapshot.id);
+    const account = accountById.get(snapshot.accountId);
+    if (!account) throw new Error(`Saldo aponta para conta inexistente: ${snapshot.accountId}`);
+    if (account.currency !== snapshot.currency) throw new Error('Backup contém snapshot em moeda incompatível com a conta');
+    if (!Number.isSafeInteger(snapshot.balanceCents)) throw new Error('Backup contém snapshot de saldo inválido');
+    if (!oneOf(snapshot.source, ['import', 'manual'] as const)) throw new Error('Backup contém origem de snapshot inválida');
+    if (!validTimestamp(snapshot.asOf) || !validTimestamp(snapshot.createdAt)) throw new Error('Backup contém data de saldo inválida');
+    snapshot.asOf = canonicalTimestamp(snapshot.asOf)!;
+    snapshot.createdAt = canonicalTimestamp(snapshot.createdAt)!;
+    if (snapshot.asOf > snapshot.createdAt) throw new Error('Backup contém snapshot criado antes do saldo observado');
+    if (snapshot.reconciled !== true) throw new Error('Backup contém snapshot não reconciliado na coleção de saldos');
+    if (snapshot.logicalAsOf) {
+      if (!validTimestamp(snapshot.logicalAsOf)) throw new Error('Backup contém instante lógico de saldo inválido');
+      snapshot.logicalAsOf = canonicalTimestamp(snapshot.logicalAsOf)!;
+    }
+    if (snapshot.reconciliationBatchId) {
+      const linkedBatch = batchById.get(snapshot.reconciliationBatchId);
+      if (!linkedBatch) throw new Error('Backup contém snapshot ligado a lote inexistente');
+      if ((snapshot.logicalAsOf ?? snapshot.asOf) !== linkedBatch.logicalAsOf) {
+        throw new Error('Backup contém snapshot com instante diferente do lote de reconciliação');
+      }
+      const key = `${snapshot.reconciliationBatchId}:${snapshot.accountId}`;
+      if (snapshotBatchAccounts.has(key)) throw new Error('Backup contém mais de um snapshot da conta no mesmo lote');
+      snapshotBatchAccounts.add(key);
+    }
+  }
+
+  const policyCurrencies = new Set<string>();
+  for (const policy of state.reservePolicies) {
+    if (!nonEmpty(policy.currency) || policyCurrencies.has(policy.currency)) throw new Error('Backup contém políticas de reserva duplicadas ou sem moeda');
+    policyCurrencies.add(policy.currency);
+    if (!Number.isSafeInteger(policy.minimumCents) || policy.minimumCents < 0) throw new Error('Backup contém reserva mínima inválida');
+    if (policy.targetCents !== undefined && (!Number.isSafeInteger(policy.targetCents) || policy.targetCents < policy.minimumCents)) {
+      throw new Error('Backup contém reserva alvo inválida');
+    }
+    if (!validTimestamp(policy.updatedAt)) throw new Error('Backup contém atualização de reserva inválida');
+    policy.updatedAt = canonicalTimestamp(policy.updatedAt)!;
+  }
+
+  const eventIds = new Set<string>();
+  state.plannedEvents = state.plannedEvents.map((event) => {
+    if (!nonEmpty(event.id) || eventIds.has(event.id)) throw new Error('Backup contém compromissos duplicados ou sem ID');
+    eventIds.add(event.id);
+    if (!nonEmpty(event.title)) throw new Error('Backup contém compromisso sem título');
+    if (!nonEmpty(event.currency)) throw new Error('Backup contém compromisso sem moeda');
+    if (event.needsAccountReview !== undefined && typeof event.needsAccountReview !== 'boolean') throw new Error('Backup contém flag de revisão de compromisso inválida');
+    if (!oneOf(event.kind, ['income', 'expense', 'transfer', 'installment', 'recurring'] as const)) throw new Error('Backup contém tipo de compromisso inválido');
+    if (!oneOf(event.direction, ['inflow', 'outflow'] as const)) throw new Error('Backup contém direção de compromisso inválida');
+    if (typeof event.active !== 'boolean') throw new Error('Backup contém estado de compromisso inválido');
+    if (event.kind === 'income' && event.direction !== 'inflow') throw new Error('Backup contém receita planejada com direção inválida');
+    if (event.kind !== 'income' && event.direction !== 'outflow') throw new Error('Backup contém saída planejada com direção inválida');
+    if (!Number.isSafeInteger(event.amountCents) || event.amountCents <= 0) throw new Error('Backup contém compromisso inválido');
+    if (!isCivilDate(event.dueDate)) throw new Error('Backup contém vencimento inválido');
+    if (!validTimestamp(event.createdAt) || !validTimestamp(event.updatedAt)) throw new Error('Backup contém timestamp de compromisso inválido');
+    event.createdAt = canonicalTimestamp(event.createdAt)!;
+    event.updatedAt = canonicalTimestamp(event.updatedAt)!;
+    if (event.updatedAt < event.createdAt) throw new Error('Backup contém compromisso atualizado antes da criação');
+    if (event.recurrence) {
+      if (!oneOf(event.recurrence.frequency, ['weekly', 'monthly', 'yearly'] as const)) throw new Error('Backup contém frequência de recorrência inválida');
+      if (!Number.isSafeInteger(event.recurrence.interval) || event.recurrence.interval <= 0 || event.recurrence.interval > 10_000) throw new Error('Backup contém recorrência inválida');
+      if (event.recurrence.until && (!isCivilDate(event.recurrence.until) || event.recurrence.until < event.dueDate)) throw new Error('Backup contém fim de recorrência inválido');
+      if (event.recurrence.maxOccurrences !== undefined && (!Number.isSafeInteger(event.recurrence.maxOccurrences) || event.recurrence.maxOccurrences <= 0 || event.recurrence.maxOccurrences > 10_000)) {
+        throw new Error('Backup contém limite de recorrência inválido');
+      }
+    }
+
+    if (event.accountId) {
+      const linked = accountById.get(event.accountId);
+      if (linked && linked.active && linked.currency === event.currency) {
+        return { ...event, needsAccountReview: false };
+      }
+      // Um vínculo explícito nunca é transferido silenciosamente para outra
+      // conta. Conta inativa, removida ou com moeda divergente exige revisão.
+      return { ...event, active: false, needsAccountReview: true };
+    }
+
+    const candidates = state.accounts.filter((account) =>
+      account.active && account.currency === event.currency);
+    if (candidates.length === 1) {
+      return { ...event, accountId: candidates[0]!.id, needsAccountReview: false };
+    }
+
+    // Estados anteriores podiam conter eventos sem conta. O evento é
+    // preservado, mas fica suspenso quando a migração não é inequívoca.
+    return { ...event, accountId: undefined, active: false, needsAccountReview: true };
+  });
+
+  const transferIds = new Set<string>();
+  for (const transfer of state.plannedTransfers) {
+    if (!nonEmpty(transfer.id) || transferIds.has(transfer.id)) throw new Error('Backup contém transferências planejadas duplicadas ou sem ID');
+    transferIds.add(transfer.id);
+    const source = accountById.get(transfer.sourceAccountId);
+    const destination = accountById.get(transfer.destinationAccountId);
+    if (!source || !destination || source.id === destination.id) throw new Error('Backup contém transferência com conta inválida');
+    if (source.currency !== destination.currency) throw new Error('Backup contém transferência cambial não suportada');
+    if (!oneOf(transfer.status, ['active', 'cancelled'] as const) || !oneOf(transfer.evidenceLevel, ['confirmed', 'planned', 'estimated'] as const)) {
+      throw new Error('Backup contém estado de transferência inválido');
+    }
+    if (!nonEmpty(transfer.title)) throw new Error('Backup contém transferência sem título');
+    if (!Number.isSafeInteger(transfer.amountCents) || transfer.amountCents <= 0 || !Number.isSafeInteger(transfer.feeCents) || transfer.feeCents < 0) {
+      throw new Error('Backup contém valor de transferência inválido');
+    }
+    if (!canAddCents(transfer.amountCents, transfer.feeCents)) throw new Error('Backup contém transferência acima do limite monetário seguro');
+    if (!isCivilDate(transfer.dueDate)) throw new Error('Backup contém data de transferência inválida');
+  }
+
+  const feedbackKeys = new Set<string>();
+  for (const feedback of state.insightFeedback) {
+    if (!nonEmpty(feedback.insightKey) || feedbackKeys.has(feedback.insightKey)) throw new Error('Backup contém feedback de insight duplicado ou inválido');
+    feedbackKeys.add(feedback.insightKey);
+    if (feedback.useful !== undefined && typeof feedback.useful !== 'boolean') throw new Error('Backup contém avaliação de insight inválida');
+    for (const key of ['lastShownAt', 'dismissedAt'] as const) {
+      const value = feedback[key];
+      if (value !== undefined) {
+        if (!validTimestamp(value)) throw new Error('Backup contém data de insight inválida');
+        feedback[key] = canonicalTimestamp(value)!;
+      }
+    }
+  }
+
+  const reviewGroupIds = new Set<string>();
+  const reviewGroupKeys = new Set<string>();
+  for (const group of state.reviewGroups as ReviewGroup[]) {
+    if (!nonEmpty(group.id) || reviewGroupIds.has(group.id) || !nonEmpty(group.key) || reviewGroupKeys.has(group.key)) {
+      throw new Error('Backup contém grupos de revisão duplicados ou inválidos');
+    }
+    reviewGroupIds.add(group.id);
+    reviewGroupKeys.add(group.key);
+    if (!nonEmpty(group.merchantNormalized) || !nonEmpty(group.merchantLabel) || !nonEmpty(group.currency)) throw new Error('Backup contém grupo de revisão incompleto');
+    if (!oneOf(group.direction, ['inflow', 'outflow'] as const)
+      || !oneOf(group.kind, ['income', 'expense', 'transfer', 'refund', 'adjustment', 'unknown'] as const)
+      || !oneOf(group.technicalType, TECHNICAL_TYPES)
+      || group.kind !== kindForTechnicalType(group.technicalType)
+      || !oneOf(group.status, ['pending', 'deferred'] as const)) throw new Error('Backup contém estado de grupo de revisão inválido');
+    if (!Array.isArray(group.transactionIds) || group.transactionIds.some((id) => !transactionIds.has(id))) throw new Error('Backup contém grupo ligado a transação inexistente');
+    if (group.suggestedCategoryId !== undefined && !categoryIds.has(group.suggestedCategoryId)) throw new Error('Backup contém sugestão ligada a categoria inexistente');
+    if (group.suggestionConfidence !== undefined && !oneOf(group.suggestionConfidence, ['high', 'medium', 'low'] as const)) throw new Error('Backup contém confiança de sugestão inválida');
+    if (!Array.isArray(group.suggestionEvidence) || group.suggestionEvidence.some((item) => !nonEmpty(item))) throw new Error('Backup contém evidência de sugestão inválida');
+    if (!validTimestamp(group.createdAt) || !validTimestamp(group.updatedAt)) throw new Error('Backup contém timestamp de grupo inválido');
+    group.createdAt = canonicalTimestamp(group.createdAt)!;
+    group.updatedAt = canonicalTimestamp(group.updatedAt)!;
+    if (group.deferredAt !== undefined) {
+      if (!validTimestamp(group.deferredAt)) throw new Error('Backup contém adiamento de grupo inválido');
+      group.deferredAt = canonicalTimestamp(group.deferredAt)!;
+    }
+  }
+
+  const reviewDecisionIds = new Set<string>();
+  for (const decision of state.reviewDecisions as ReviewDecision[]) {
+    if (!nonEmpty(decision.id) || reviewDecisionIds.has(decision.id) || !nonEmpty(decision.label)) throw new Error('Backup contém decisão de revisão inválida');
+    reviewDecisionIds.add(decision.id);
+    if (!oneOf(decision.kind, ['apply_group_category', 'apply_transaction_category', 'defer_group', 'create_rule', 'resolve_without_category', 'reopen_group'] as const)) throw new Error('Backup contém tipo de decisão inválido');
+    if (!Array.isArray(decision.transactionIds) || decision.transactionIds.some((id) => !nonEmpty(id) || !transactionIds.has(id))) throw new Error('Backup contém transações de decisão inválidas');
+    if (!Array.isArray(decision.before) || !Array.isArray(decision.after) || !Array.isArray(decision.ruleChanges)) throw new Error('Backup contém histórico de decisão incompleto');
+    for (const classification of [...decision.before, ...decision.after]) {
+      if (!nonEmpty(classification.transactionId) || !transactionIds.has(classification.transactionId)) throw new Error('Backup contém snapshot de decisão inválido');
+      if (classification.categoryId !== undefined && (!nonEmpty(classification.categoryId) || !categoryIds.has(classification.categoryId))) throw new Error('Backup contém categoria de snapshot inválida');
+      if (!oneOf(classification.categorySource, ['manual', 'rule', 'system', 'none'] as const)) throw new Error('Backup contém origem de snapshot inválida');
+      if (!oneOf(classification.categoryReviewStatus, ['pending', 'deferred', 'resolved', 'not_applicable'] as const)) throw new Error('Backup contém estado de revisão do snapshot inválido');
+      if ((!classification.categoryId && classification.categorySource !== 'none') || (classification.categoryId && classification.categorySource === 'none')) throw new Error('Backup contém snapshot de categoria inconsistente');
+      if (classification.categoryId && classification.categoryReviewStatus !== 'resolved') throw new Error('Backup contém snapshot categorizado ainda pendente');
+      if (typeof classification.needsReview !== 'boolean' || !Array.isArray(classification.reviewReasons) || !Array.isArray(classification.manualEditLog)) throw new Error('Backup contém snapshot de revisão incompleto');
+      if (!validTimestamp(classification.updatedAt)) throw new Error('Backup contém atualização de snapshot inválida');
+      classification.updatedAt = canonicalTimestamp(classification.updatedAt)!;
+    }
+    for (const change of decision.ruleChanges) {
+      if (!change || typeof change !== 'object' || (!change.before && !change.after)) throw new Error('Backup contém alteração de regra inválida');
+      for (const rule of [change.before, change.after]) {
+        if (!rule) continue;
+        if (!nonEmpty(rule.id) || !nonEmpty(rule.pattern) || !categoryIds.has(rule.categoryId)) throw new Error('Backup contém snapshot de regra inválido');
+      }
+    }
+    if (!validTimestamp(decision.createdAt)) throw new Error('Backup contém data de decisão inválida');
+    decision.createdAt = canonicalTimestamp(decision.createdAt)!;
+    if (decision.undoneAt !== undefined) {
+      if (!validTimestamp(decision.undoneAt)) throw new Error('Backup contém data de desfazer inválida');
+      decision.undoneAt = canonicalTimestamp(decision.undoneAt)!;
+    }
+  }
+
+  state.reviewGroups = buildReviewGroups(state);
+  return state;
+}
+
+export function loadLocalState(userId: string, fallback: AppState): AppState | undefined {
+  try {
+    const raw = localStorage.getItem(cacheKey(userId));
+    if (raw) return normalizeState(JSON.parse(raw), fallback);
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveLocalState(userId: string, state: AppState) {
+  localStorage.setItem(cacheKey(userId), JSON.stringify(state));
+}
+
+export function loadSyncMetadata(userId: string): SyncMetadata | undefined {
+  try {
+    const raw = localStorage.getItem(syncMetadataKey(userId));
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as Partial<SyncMetadata>;
+    if (!Number.isSafeInteger(parsed.remoteRevision) || (parsed.remoteRevision ?? -1) < 1) return undefined;
+    if (typeof parsed.remoteUpdatedAt !== 'string' || typeof parsed.lastSyncedStateHash !== 'string') return undefined;
+    return parsed as SyncMetadata;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveSyncMetadata(userId: string, metadata: SyncMetadata) {
+  localStorage.setItem(syncMetadataKey(userId), JSON.stringify(metadata));
+}
+
+export function createCheckpoint(userId: string, state: AppState, label: string) {
+  try {
+    const key = checkpointKey(userId);
+    const existing = JSON.parse(localStorage.getItem(key) ?? '[]') as Array<{ label: string; createdAt: string; state: AppState }>;
+    existing.unshift({ label, createdAt: new Date().toISOString(), state });
+    localStorage.setItem(key, JSON.stringify(existing.slice(0, 8)));
+  } catch {
+    // Checkpoint local é proteção adicional; falha de quota não bloqueia o app.
+  }
+}
+
+export function exportState(state: AppState) {
+  const payload = { schemaVersion: state.schemaVersion, exportedAt: new Date().toISOString(), state };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const anchor = document.createElement('a');
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = `japa-finance-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(anchor.href);
+}
+
+export async function parseBackupFile(file: File, fallback: AppState): Promise<AppState> {
+  const parsed = JSON.parse(await file.text()) as Record<string, unknown>;
+  const state = 'state' in parsed ? parsed.state : parsed;
+  return normalizeState(state, fallback);
+}
+
+export function resolveIssues(
+  issues: ImportIssue[],
+  issueIds: string[],
+  status: ImportIssue['status'],
+): ImportIssue[] {
+  const idSet = new Set(issueIds);
+  const resolvedAt = status === 'unresolved' ? undefined : new Date().toISOString();
+  return issues.map((item) => idSet.has(item.id) ? { ...item, status, resolvedAt } : item);
+}
