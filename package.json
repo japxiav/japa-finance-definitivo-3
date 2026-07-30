@@ -1,0 +1,45 @@
+{
+  "name": "japa-finance",
+  "private": true,
+  "version": "0.9.0-alpha.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "verify:sync": "node scripts/verify-sync-structure.mjs",
+    "verify:consolidation": "rm -rf consolidation_build && tsc --outDir consolidation_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-consolidation.ts src/domain/model.ts src/domain/arithmetic.ts src/domain/dates.ts src/domain/validation.ts src/domain/forecast.ts src/domain/flows.ts src/domain/recurrence.ts src/domain/decisions.ts src/domain/imports.ts src/core/csv.ts src/core/date.ts src/core/hash.ts src/core/merchant.ts src/core/money.ts src/core/finance.ts src/core/types.ts && printf '{\"type\":\"commonjs\"}' > consolidation_build/package.json && node consolidation_build/scripts/verify-consolidation.js",
+    "typecheck": "tsc -b",
+    "verify:architecture": "node scripts/verify-architecture.mjs",
+    "verify:operational": "rm -rf operational_build && tsc --outDir operational_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-operational.ts src/application/FinancialDecisionFacade.ts src/application/appStateAdapter.ts src/application/reconciliation.ts src/application/plannedEvents.ts src/domain/model.ts src/domain/arithmetic.ts src/domain/dates.ts src/domain/validation.ts src/domain/forecast.ts src/domain/flows.ts src/domain/recurrence.ts src/domain/decisions.ts src/domain/imports.ts src/core/csv.ts src/core/date.ts src/core/hash.ts src/core/merchant.ts src/core/money.ts src/core/finance.ts src/core/types.ts && printf '{\"type\":\"commonjs\"}' > operational_build/package.json && node operational_build/scripts/verify-operational.js",
+    "verify:security": "node scripts/verify-security.mjs",
+    "verify:pwa": "node scripts/verify-pwa.mjs",
+    "verify:supabase": "node scripts/verify-supabase.mjs",
+    "verify:all": "npm run verify:local && npm run test:rls",
+    "test:rls": "node scripts/test-rls-two-users.mjs",
+    "verify:professional": "rm -rf professional_audit_build && tsc --outDir professional_audit_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-professional-audit.ts src/domain/model.ts src/domain/arithmetic.ts src/domain/dates.ts src/domain/validation.ts src/domain/forecast.ts src/domain/flows.ts src/domain/recurrence.ts src/domain/decisions.ts && printf '{\"type\":\"commonjs\"}' > professional_audit_build/package.json && node professional_audit_build/scripts/verify-professional-audit.js",
+    "verify:auth": "rm -rf auth_audit_build && tsc --outDir auth_audit_build --strict --target ES2022 --module CommonJS --moduleResolution Node src/auth/accessControl.ts && printf '{\"type\":\"commonjs\"}' > auth_audit_build/package.json && node scripts/verify-auth-isolation.mjs",
+    "verify:code": "npm run verify:insights && npm run verify:consolidation && npm run verify:operational && npm run verify:professional && npm run verify:auth && npm run verify:architecture && npm run verify:sync && npm run verify:security && npm run verify:pwa && npm run verify:supabase",
+    "verify:local": "npm test && npm run verify:code && npm run build",
+    "verify:insights": "rm -rf insights_build && tsc --outDir insights_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-insights.ts src/analytics/metrics.ts src/insights/types.ts src/insights/engine.ts src/data/defaults.ts src/core/csv.ts src/core/date.ts src/core/hash.ts src/core/merchant.ts src/core/money.ts src/core/finance.ts src/core/storage.ts src/core/types.ts src/domain/arithmetic.ts src/domain/dates.ts && printf '{\"type\":\"commonjs\"}' > insights_build/package.json && node insights_build/scripts/verify-insights.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.55.0",
+    "lucide-react": "0.468.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "pdfjs-dist": "6.1.200"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.7",
+    "@vitejs/plugin-react": "5.0.2",
+    "typescript": "5.8.3",
+    "vite": "7.1.2",
+    "vitest": "3.2.4"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  }
+}
