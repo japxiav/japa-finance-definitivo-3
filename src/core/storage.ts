@@ -4,6 +4,9 @@ import { civilDateFromUtcInstant, civilDaysBetween, isCivilDate } from '../domai
 import { localCivilDateFromInstant } from './date';
 import { isTransactionKindDirectionCompatible } from './finance';
 import { buildReviewGroups } from '../classification/grouping';
+import { normalizeMerchant } from './merchant';
+import { parseMoneyToCents } from './money';
+import { stableHash } from './hash';
 import {
   identifyTechnicalMovement,
   isCategoryReviewApplicable,
@@ -199,7 +202,7 @@ function inferTechnicalType(transaction: Transaction): TechnicalMovementType {
   return 'unknown';
 }
 
-function migrateV6(candidate: Record<string, unknown>): AppState {
+function migrateV6(candidate: Record<string, unknown>): Record<string, unknown> {
   const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
   const categories = (Array.isArray(candidate.categories) ? candidate.categories as Category[] : [])
     .map((category) => category.id === 'family' && category.system
@@ -269,6 +272,116 @@ function migrateV6(candidate: Record<string, unknown>): AppState {
   };
 }
 
+
+function feeCentsFromLegacyTransaction(transaction: Transaction): number {
+  if (Number.isSafeInteger(transaction.feeCents) && (transaction.feeCents ?? 0) > 0) return transaction.feeCents!;
+  const original = transaction.originalData ?? {};
+  const raw = original['Comissão'] ?? original['Commission'] ?? original['Fee'] ?? original['Taxa'] ?? '';
+  if (!raw.trim()) return 0;
+  try {
+    return parseMoneyToCents(raw);
+  } catch {
+    return 0;
+  }
+}
+
+function isBankReverted(raw?: string): boolean {
+  return /revert|reversal|reversed|revertida|revertido|estornada|estornado/i.test(raw ?? '');
+}
+
+function migrateV7(candidate: Record<string, unknown>): AppState {
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const existingFeeParents = new Set(oldTransactions
+    .filter((transaction) => transaction.sourceComponent === 'fee' && transaction.feeOfTransactionId)
+    .map((transaction) => transaction.feeOfTransactionId!));
+  const transactions: Transaction[] = [];
+
+  for (const legacy of oldTransactions) {
+    if (legacy.sourceComponent === 'fee') {
+      transactions.push({ ...legacy, sourceComponent: 'fee' });
+      continue;
+    }
+
+    const reverted = isBankReverted(legacy.bankState);
+    const feeCents = feeCentsFromLegacyTransaction(legacy);
+    const reportedAmountCents = Number.isSafeInteger(legacy.reportedAmountCents)
+      ? legacy.reportedAmountCents!
+      : (legacy.direction === 'inflow' ? legacy.amountCents : -legacy.amountCents);
+    const primary: Transaction = {
+      ...legacy,
+      status: reverted ? 'reverted' : legacy.status,
+      reportedAmountCents,
+      netMovementCents: reverted ? 0 : reportedAmountCents,
+      feeCents: feeCents || undefined,
+      sourceComponent: 'primary',
+      sourceFingerprint: legacy.sourceFingerprint
+        ? legacy.sourceFingerprint.replace(/:(?:primary|fee)$/, '') + ':primary'
+        : legacy.sourceFileHash && legacy.sourceRowNumber
+          ? `${legacy.sourceFileHash}:${legacy.sourceRowNumber}:primary`
+          : legacy.sourceFingerprint,
+      categoryId: reverted ? undefined : legacy.categoryId,
+      categorySource: reverted ? 'none' : legacy.categorySource,
+      categoryReviewStatus: reverted ? 'not_applicable' : legacy.categoryReviewStatus,
+      needsReview: reverted ? false : legacy.needsReview,
+      reviewReasons: reverted ? [] : [...legacy.reviewReasons],
+    };
+    transactions.push(primary);
+
+    if (reverted || feeCents <= 0 || legacy.feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT' || existingFeeParents.has(legacy.id)) continue;
+    const feeBase = stableHash(`${legacy.semanticFingerprint ?? legacy.dedupFingerprint.replace(/:\d+$/, '')}|fee|${feeCents}`);
+    const feeDescription = `Comissão de ${legacy.descriptionOriginal}`;
+    transactions.push({
+      id: `fee-${legacy.id}`,
+      accountId: legacy.accountId,
+      importId: legacy.importId,
+      dedupFingerprint: `${feeBase}:1`,
+      sourceFileHash: legacy.sourceFileHash,
+      sourceRowNumber: legacy.sourceRowNumber,
+      amountCents: feeCents,
+      reportedAmountCents: -feeCents,
+      netMovementCents: -feeCents,
+      feeTreatment: 'INCLUDED_IN_REPORTED_AMOUNT',
+      sourceFingerprint: legacy.sourceFileHash && legacy.sourceRowNumber
+        ? `${legacy.sourceFileHash}:${legacy.sourceRowNumber}:fee`
+        : legacy.sourceFingerprint ? `${legacy.sourceFingerprint}:fee` : undefined,
+      sourceComponent: 'fee',
+      feeOfTransactionId: legacy.id,
+      semanticFingerprint: feeBase,
+      currency: legacy.currency,
+      direction: 'outflow',
+      source: legacy.source,
+      status: 'completed',
+      kind: 'expense',
+      technicalType: 'bank_fee',
+      kindSource: 'bank',
+      analysisExcluded: false,
+      descriptionOriginal: feeDescription,
+      merchantNormalized: normalizeMerchant(feeDescription),
+      bankType: 'Comissão',
+      bankProduct: legacy.bankProduct,
+      bankState: legacy.bankState,
+      startedAt: legacy.startedAt,
+      completedAt: legacy.completedAt,
+      reportingDate: legacy.reportingDate,
+      categorySource: 'none',
+      categoryReviewStatus: 'resolved',
+      needsReview: false,
+      reviewReasons: [],
+      manualEditLog: [],
+      originalData: { ...legacy.originalData },
+      createdAt: legacy.createdAt,
+      updatedAt: legacy.updatedAt,
+    });
+  }
+
+  return {
+    ...(candidate as unknown as Omit<AppState, 'schemaVersion' | 'transactions' | 'reviewGroups'>),
+    schemaVersion: 8,
+    transactions,
+    reviewGroups: [],
+  };
+}
+
 export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
   const candidate = raw as Record<string, unknown>;
@@ -295,7 +408,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 6) {
     return normalizeState(migrateV6(candidate), fallback);
   }
-  if (candidate.schemaVersion !== 7) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 7) {
+    return normalizeState(migrateV7(candidate), fallback);
+  }
+  if (candidate.schemaVersion !== 8) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
@@ -335,6 +451,25 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     return date.toISOString();
   };
   const validTimestamp = (value: unknown) => canonicalTimestamp(value) !== undefined;
+  const canonicalBankTimestamp = (value: unknown): string | undefined => {
+    const utc = canonicalTimestamp(value);
+    if (utc) return utc;
+    if (typeof value !== 'string') return undefined;
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(value);
+    if (!match) return undefined;
+    const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw] = match;
+    const year = Number(yearRaw);
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    const hour = Number(hourRaw);
+    const minute = Number(minuteRaw);
+    const second = Number(secondRaw);
+    if (hour > 23 || minute > 59 || second > 59) return undefined;
+    const check = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+    if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return undefined;
+    return value;
+  };
+  const validBankTimestamp = (value: unknown) => canonicalBankTimestamp(value) !== undefined;
   const oneOf = <T extends string>(value: unknown, allowed: readonly T[]): value is T =>
     typeof value === 'string' && (allowed as readonly string[]).includes(value);
 
@@ -425,8 +560,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (!oneOf(transaction.kind, ['income', 'expense', 'transfer', 'refund', 'adjustment', 'unknown'] as const)) throw new Error('Backup contém natureza financeira inválida');
     if (!oneOf(transaction.technicalType, TECHNICAL_TYPES)) throw new Error('Backup contém tipo técnico de transação inválido');
     if (transaction.kind !== kindForTechnicalType(transaction.technicalType)) throw new Error('Backup contém tipo técnico incoerente com a natureza financeira');
-    if (!oneOf(transaction.status, ['completed', 'pending', 'voided', 'merged'] as const)) throw new Error('Backup contém status de transação inválido');
+    if (!oneOf(transaction.status, ['completed', 'pending', 'reverted', 'voided', 'merged'] as const)) throw new Error('Backup contém status de transação inválido');
     if (!oneOf(transaction.source, ['revolut_csv', 'wise_csv', 'revolut_pdf', 'manual'] as const)) throw new Error('Backup contém origem de transação inválida');
+    if (transaction.sourceComponent !== undefined && !oneOf(transaction.sourceComponent, ['primary', 'fee'] as const)) throw new Error('Backup contém componente de transação inválido');
+    transaction.sourceComponent ??= 'primary';
     if (!oneOf(transaction.kindSource, ['bank', 'manual', 'rule', 'system', 'unknown'] as const)) throw new Error('Backup contém origem de classificação inválida');
     if (!oneOf(transaction.categorySource, ['manual', 'rule', 'system', 'none'] as const)) throw new Error('Backup contém origem de categoria inválida');
     if (!oneOf(transaction.categoryReviewStatus, ['pending', 'deferred', 'resolved', 'not_applicable'] as const)) throw new Error('Backup contém estado de revisão de categoria inválido');
@@ -438,6 +575,14 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
       transaction.categoryId = undefined;
       transaction.categorySource = 'none';
       transaction.categoryReviewStatus = 'not_applicable';
+    }
+    if (transaction.status === 'reverted') {
+      transaction.netMovementCents = 0;
+      transaction.categoryId = undefined;
+      transaction.categorySource = 'none';
+      transaction.categoryReviewStatus = 'not_applicable';
+      transaction.reviewReasons = [];
+      transaction.needsReview = false;
     }
     const excludedByType = transaction.technicalType === 'internal_transfer' || transaction.technicalType === 'currency_conversion';
     transaction.analysisExcluded = excludedByType;
@@ -452,12 +597,12 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (transaction.feeCents !== undefined && (!Number.isSafeInteger(transaction.feeCents) || transaction.feeCents < 0)) throw new Error('Backup contém taxa inválida');
     if (!isCivilDate(transaction.reportingDate)) throw new Error('Backup contém data contábil inválida');
     if (transaction.startedAt !== undefined) {
-      const normalized = canonicalTimestamp(transaction.startedAt);
+      const normalized = canonicalBankTimestamp(transaction.startedAt);
       if (!normalized) throw new Error('Backup contém início de transação inválido');
       transaction.startedAt = normalized;
     }
     if (transaction.completedAt !== undefined) {
-      const normalized = canonicalTimestamp(transaction.completedAt);
+      const normalized = canonicalBankTimestamp(transaction.completedAt);
       if (!normalized) throw new Error('Backup contém conclusão de transação inválida');
       transaction.completedAt = normalized;
     }
@@ -475,8 +620,8 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
         throw new Error('Backup contém edição manual fora da linha temporal da transação');
       }
     }
-    if (transaction.startedAt !== undefined && !validTimestamp(transaction.startedAt)) throw new Error('Backup contém início de transação inválido');
-    if (transaction.completedAt !== undefined && !validTimestamp(transaction.completedAt)) throw new Error('Backup contém conclusão de transação inválida');
+    if (transaction.startedAt !== undefined && !validBankTimestamp(transaction.startedAt)) throw new Error('Backup contém início de transação inválido');
+    if (transaction.completedAt !== undefined && !validBankTimestamp(transaction.completedAt)) throw new Error('Backup contém conclusão de transação inválida');
     if (transaction.startedAt && transaction.completedAt && Date.parse(transaction.completedAt) < Date.parse(transaction.startedAt)) {
       throw new Error('Backup contém transação concluída antes de começar');
     }
@@ -494,6 +639,26 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (transaction.technicalType === 'unknown' && !transaction.reviewReasons.includes('unknown_kind')) transaction.reviewReasons.push('unknown_kind');
     if (transaction.technicalType !== 'unknown') transaction.reviewReasons = transaction.reviewReasons.filter((reason) => reason !== 'unknown_kind');
     transaction.needsReview = transaction.reviewReasons.length > 0;
+  }
+
+
+  const transactionByIdForFees = new Map(state.transactions.map((transaction) => [transaction.id, transaction]));
+  for (const transaction of state.transactions) {
+    if (transaction.sourceComponent === 'fee') {
+      const parent = transaction.feeOfTransactionId ? transactionByIdForFees.get(transaction.feeOfTransactionId) : undefined;
+      if (!parent || parent.sourceComponent === 'fee') throw new Error('Backup contém taxa sem movimentação de origem');
+      if (transaction.accountId !== parent.accountId
+        || transaction.currency !== parent.currency
+        || transaction.reportingDate !== parent.reportingDate
+        || transaction.importId !== parent.importId) {
+        throw new Error('Backup contém taxa incompatível com a movimentação de origem');
+      }
+      if (transaction.technicalType !== 'bank_fee' || transaction.kind !== 'expense' || transaction.direction !== 'outflow') {
+        throw new Error('Backup contém componente de taxa com natureza inválida');
+      }
+    } else if (transaction.feeOfTransactionId !== undefined) {
+      throw new Error('Backup contém vínculo de taxa em movimentação principal');
+    }
   }
 
   const importIds = new Set<string>();

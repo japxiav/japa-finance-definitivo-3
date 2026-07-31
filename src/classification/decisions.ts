@@ -2,6 +2,7 @@ import type {
   AppState,
   CategoryRule,
   CategorySource,
+  RuleKind,
   ReviewDecision,
   ReviewDecisionKind,
   Transaction,
@@ -26,10 +27,10 @@ function snapshot(transaction: Transaction): TransactionClassificationSnapshot {
 function sameRuleScope(
   rule: CategoryRule,
   scope: {
-    currency: string;
-    direction: Transaction['direction'];
-    transactionKind: Transaction['kind'];
-    technicalType: Transaction['technicalType'];
+    currency?: string;
+    direction?: Transaction['direction'];
+    transactionKind?: Transaction['kind'];
+    technicalType?: Transaction['technicalType'];
   },
 ): boolean {
   return rule.currency === scope.currency
@@ -67,10 +68,11 @@ export function applyCategoryDecision(input: {
   createRule?: {
     pattern: string;
     merchantLabel: string;
-    currency: string;
-    direction: Transaction['direction'];
-    transactionKind: Transaction['kind'];
-    technicalType: Transaction['technicalType'];
+    kind?: RuleKind;
+    currency?: string;
+    direction?: Transaction['direction'];
+    transactionKind?: Transaction['kind'];
+    technicalType?: Transaction['technicalType'];
     exceptionTransactionIds?: string[];
   };
   now?: string;
@@ -133,6 +135,7 @@ export function applyCategoryDecision(input: {
 
   if (input.createRule && input.categoryId) {
     const normalizedPattern = normalizeMerchant(input.createRule.pattern);
+    const ruleKind = input.createRule.kind ?? 'exact';
     const scope = {
       currency: input.createRule.currency,
       direction: input.createRule.direction,
@@ -141,7 +144,7 @@ export function applyCategoryDecision(input: {
     };
     const existing = rules.find((rule) =>
       rule.source === 'learned'
-      && rule.kind === 'exact'
+      && rule.kind === ruleKind
       && normalizeMerchant(rule.pattern) === normalizedPattern
       && sameRuleScope(rule, scope));
     const exceptionIds = new Set([
@@ -152,7 +155,7 @@ export function applyCategoryDecision(input: {
     const learnedRule: CategoryRule = {
       id: existing?.id ?? `learned-${crypto.randomUUID()}`,
       pattern: normalizedPattern,
-      kind: 'exact',
+      kind: ruleKind,
       categoryId: input.categoryId,
       order: existing?.order ?? 0,
       source: 'learned',

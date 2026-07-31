@@ -6,7 +6,7 @@ import type { ImportIssue } from './types';
 describe('backup e pendências', () => {
   it('aceita estado atual válido', () => {
     const restored = normalizeState(JSON.parse(JSON.stringify(initialState)), initialState);
-    expect(restored.schemaVersion).toBe(7);
+    expect(restored.schemaVersion).toBe(8);
     expect(restored.accounts).toHaveLength(4);
   });
 

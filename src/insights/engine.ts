@@ -168,8 +168,11 @@ function addDataQualityInsights(state: AppState, bundle: AnalyticsBundle, items:
   const currencyAccountIds = new Set(state.accounts
     .filter((account) => account.currency === bundle.currency)
     .map((account) => account.id));
+  const currentTransactionIds = new Set(current.transactions.map((item) => item.id));
   const unresolvedIssues = state.importIssues.filter((item) =>
-    item.status === 'unresolved' && currencyAccountIds.has(item.accountId));
+    item.status === 'unresolved'
+    && currencyAccountIds.has(item.accountId)
+    && Boolean(item.transactionId && currentTransactionIds.has(item.transactionId)));
   const unresolvedTransactionIds = new Set(
     unresolvedIssues
       .map((item) => item.transactionId)
@@ -181,7 +184,7 @@ function addDataQualityInsights(state: AppState, bundle: AnalyticsBundle, items:
     .length;
   const classificationGroups = state.reviewGroups.filter((item) => item.currency === bundle.currency && item.status === 'pending').length;
   const eventReviews = state.plannedEvents.filter((item) => item.currency === bundle.currency && item.needsAccountReview).length;
-  const criticalTotal = unresolved + reviewTransactions + eventReviews;
+  const criticalTotal = unresolved + reviewTransactions;
   if (criticalTotal > 0) {
     items.push(candidate({
       id: 'data-quality-open-items',
@@ -195,10 +198,25 @@ function addDataQualityInsights(state: AppState, bundle: AnalyticsBundle, items:
       evidence: [
         { label: 'Movimentações', value: String(reviewTransactions) },
         { label: 'Importação', value: String(unresolved) },
-        { label: 'Compromissos', value: String(eventReviews) },
       ],
       action: 'review',
       actionLabel: 'Revisar agora',
+      period: current.range,
+    }));
+  }
+  if (eventReviews > 0) {
+    items.push(candidate({
+      id: `planned-events-account-review:${bundle.currency}`,
+      family: 'planning-quality',
+      title: 'Alguns compromissos ainda precisam de conta',
+      message: `${eventReviews} ${eventReviews === 1 ? 'compromisso precisa' : 'compromissos precisam'} de uma conta-alvo antes de entrar nas previsões. Isso não altera o fluxo histórico exibido.`,
+      tone: 'attention',
+      confidence: 'high',
+      priority: 68,
+      novelty: 70,
+      evidence: [{ label: 'Compromissos', value: String(eventReviews) }],
+      action: 'review',
+      actionLabel: 'Completar planejamento',
       period: current.range,
     }));
   }

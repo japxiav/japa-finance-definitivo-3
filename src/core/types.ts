@@ -1,7 +1,7 @@
 export type CurrencyCode = 'EUR' | 'BRL' | string;
 export type Institution = 'revolut' | 'wise' | 'cash' | 'other';
 export type Direction = 'inflow' | 'outflow';
-export type TransactionStatus = 'completed' | 'pending' | 'voided' | 'merged';
+export type TransactionStatus = 'completed' | 'pending' | 'reverted' | 'voided' | 'merged';
 export type TransactionSource = 'revolut_csv' | 'wise_csv' | 'revolut_pdf' | 'manual';
 export type TransactionKind = 'income' | 'expense' | 'transfer' | 'refund' | 'adjustment' | 'unknown';
 export type TechnicalMovementType =
@@ -69,6 +69,9 @@ export interface Transaction {
   feeCents?: number;
   feeTreatment?: FeeTreatment;
   sourceFingerprint?: string;
+  /** Componente da linha bancária. Taxas adicionais viram fatos separados. */
+  sourceComponent?: 'primary' | 'fee';
+  feeOfTransactionId?: string;
   semanticFingerprint?: string;
   balanceAfterCents?: number;
   currency: CurrencyCode;
@@ -346,7 +349,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 7;
+  schemaVersion: 8;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];

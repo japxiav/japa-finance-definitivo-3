@@ -14,6 +14,9 @@ import {
   Send,
   Download,
   FileWarning,
+  FileDown,
+  Filter,
+  History,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -23,6 +26,7 @@ import {
   Tags,
   Upload,
   WalletCards,
+  WandSparkles,
   X,
 } from 'lucide-react';
 import { AuthScreen } from './auth/AuthScreen';
@@ -34,6 +38,7 @@ import { previewRevolutPdf } from './core/pdf';
 import { formatReportingDate, localCivilDate, localDateTimeToInstant } from './core/date';
 import { monthDateRange, monthKey, signedNetMovement } from './core/finance';
 import { buildAnalytics, latestReconciledBalance } from './analytics/metrics';
+import { buildPeriodComparison } from './analytics/comparison';
 import { generateInsights } from './insights/engine';
 import type { FinancialInsight } from './insights/types';
 import { InsightCard } from './components/InsightCard';
@@ -42,9 +47,12 @@ import { ReserveModal } from './components/ReserveModal';
 import { PlannedEventModal } from './components/PlannedEventModal';
 import { CategoryManagerModal } from './components/CategoryManagerModal';
 import { ReviewGroupsPanel } from './components/ReviewGroupsPanel';
+import { BulkRuleModal, type BulkRuleInput } from './components/BulkRuleModal';
 import { createConfirmedBatch, getUndoImpact, restoreImport, undoImport } from './core/imports';
 import { formatMoney, parseSignedMoneyToCents } from './core/money';
 import { normalizeMerchant } from './core/merchant';
+import { buildActivityTimeline } from './application/activityTimeline';
+import { downloadTransactionsCsv, filterTransactions } from './application/transactionFilters';
 import {
   loadRemoteState,
   RemoteStateConflictError,
@@ -270,6 +278,15 @@ function FinanceApp({ session }: { session: Session }) {
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [merchantLearning, setMerchantLearning] = useState<{ transaction: Transaction; category: Category } | null>(null);
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [dateStart, setDateStart] = useState('');
+  const [dateEnd, setDateEnd] = useState('');
+  const [minAmount, setMinAmount] = useState('');
+  const [maxAmount, setMaxAmount] = useState('');
+  const [directionFilter, setDirectionFilter] = useState<'all' | Transaction['direction']>('all');
+  const [technicalTypeFilter, setTechnicalTypeFilter] = useState<'all' | TechnicalMovementType>('all');
+  const [sourceFilter, setSourceFilter] = useState<'all' | Transaction['source']>('all');
+  const [reviewOnly, setReviewOnly] = useState(false);
+  const [bulkRuleOpen, setBulkRuleOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'discoveries' | 'assistant' | 'accounts' | 'review'>('home');
   const [assistantQuestion, setAssistantQuestion] = useState('');
   const [assistantTargetAccountId, setAssistantTargetAccountId] = useState('');
@@ -503,17 +520,35 @@ function FinanceApp({ session }: { session: Session }) {
       || (b.sourceRowNumber ?? 0) - (a.sourceRowNumber ?? 0));
   const currencies = [...new Set(activeAccounts.map((account) => account.currency))].sort();
   const months = [...new Set(visibleTransactions.map((transaction) => monthKey(transaction.reportingDate)))].sort().reverse();
-  const normalizedQuery = query.toLocaleLowerCase('pt-BR');
-  const filtered = visibleTransactions.filter((transaction) =>
-    transaction.currency === currency
-    && (accountFilter === 'all' || transaction.accountId === accountFilter)
-    && (categoryFilter === 'all' || (categoryFilter === 'uncategorized' ? !transaction.categoryId : transaction.categoryId === categoryFilter))
-    && (month === 'all' || monthKey(transaction.reportingDate) === month)
-    && `${transaction.descriptionOriginal} ${transaction.merchantNormalized} ${transaction.note ?? ''}`.toLocaleLowerCase('pt-BR').includes(normalizedQuery),
-  );
-  const range = month === 'all' ? {} : monthDateRange(month);
-  const analytics = buildAnalytics(financeState, currency, month === 'all' ? undefined : range);
-  const insightResult = generateInsights(financeState, currency, month === 'all' ? undefined : range, { limit: 30 });
+  const accountName = (id: string) => financeState.accounts.find((account) => account.id === id)?.name ?? id;
+  const completedCurrencyDates = financeState.transactions
+    .filter((transaction) => transaction.status === 'completed' && transaction.currency === currency)
+    .map((transaction) => transaction.reportingDate)
+    .sort();
+  const customRange = dateStart && dateEnd && dateStart <= dateEnd
+    ? { start: dateStart, end: dateEnd }
+    : undefined;
+  const range = customRange ?? (month === 'all'
+    ? completedCurrencyDates.length
+      ? { start: completedCurrencyDates[0]!, end: completedCurrencyDates.at(-1)! }
+      : undefined
+    : monthDateRange(month));
+  const filtered = filterTransactions(visibleTransactions, {
+    currency,
+    query,
+    accountId: accountFilter,
+    categoryId: categoryFilter,
+    periodStart: dateStart || (month !== 'all' ? range?.start : undefined),
+    periodEnd: dateEnd || (month !== 'all' ? range?.end : undefined),
+    minAmount,
+    maxAmount,
+    direction: directionFilter,
+    technicalType: technicalTypeFilter,
+    source: sourceFilter,
+    reviewOnly,
+  });
+  const analytics = buildAnalytics(financeState, currency, range);
+  const insightResult = generateInsights(financeState, currency, range, { limit: 30 });
   const homeInsights = insightResult.insights.slice(0, 3);
   const reconciledPosition = latestReconciledBalance(financeState, currency);
   const reservePolicy = financeState.reservePolicies.find((item) => item.currency === currency);
@@ -583,7 +618,7 @@ function FinanceApp({ session }: { session: Session }) {
     const issues = preview.issues.map((item) => item.kind === 'possible_duplicate' && item.transactionId && acceptedIds.has(item.transactionId)
       ? { ...item, status: 'accepted' as const, resolvedAt: new Date().toISOString() }
       : item);
-    const batch = createConfirmedBatch(preview.batch, transactions.length);
+    const batch = createConfirmedBatch(preview.batch, transactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary').length);
     setState((current) => current && withRebuiltReviewGroups({
       ...current,
       transactions: [...transactions, ...current.transactions],
@@ -941,7 +976,71 @@ function FinanceApp({ session }: { session: Session }) {
     setState({ ...financeState, importIssues: resolveIssues(financeState.importIssues, [item.id], 'ignored') });
   }
 
-  const accountName = (id: string) => financeState.accounts.find((account) => account.id === id)?.name ?? id;
+  function clearTransactionFilters() {
+    setQuery('');
+    setAccountFilter('all');
+    setCategoryFilter('all');
+    setMonth('all');
+    setDateStart('');
+    setDateEnd('');
+    setMinAmount('');
+    setMaxAmount('');
+    setDirectionFilter('all');
+    setTechnicalTypeFilter('all');
+    setSourceFilter('all');
+    setReviewOnly(false);
+  }
+
+  function exportFilteredCsv() {
+    if (invalidFilters) {
+      setError(invalidDateRange
+        ? 'A data inicial do filtro não pode ser posterior à data final.'
+        : invalidAmountRange
+          ? 'O valor mínimo não pode ser maior que o valor máximo.'
+          : 'Revise os valores mínimo e máximo informados.');
+      return;
+    }
+    if (filtered.length === 0) {
+      setError('Não há movimentações nos filtros atuais para exportar.');
+      return;
+    }
+    const periodLabel = customRange
+      ? `${customRange.start}_${customRange.end}`
+      : month === 'all' ? 'historico-completo' : month;
+    downloadTransactionsCsv(filtered, `japa-finance-${currency}-${periodLabel}.csv`, {
+      accountName,
+      categoryName,
+      technicalTypeName: technicalTypeLabel,
+    });
+  }
+
+  function applyBulkRule(input: BulkRuleInput) {
+    const category = financeState.categories.find((item) => item.id === input.categoryId && item.active);
+    if (!category || input.transactionIds.length === 0) return;
+    const selected = financeState.transactions.filter((transaction) => input.transactionIds.includes(transaction.id));
+    const uniqueKinds = [...new Set(selected.map((transaction) => transaction.kind))];
+    createCheckpoint(userId, financeState, `Antes da regra em massa ${input.pattern}`);
+    setState(applyCategoryDecision({
+      state: financeState,
+      transactionIds: input.transactionIds,
+      categoryId: input.categoryId,
+      categorySource: 'rule',
+      kind: 'create_rule',
+      label: `Regra ${input.kind}: ${input.pattern} → ${category.name} (${input.transactionIds.length})`,
+      createRule: {
+        pattern: input.pattern,
+        merchantLabel: input.pattern.trim(),
+        kind: input.kind,
+        currency,
+        direction: input.direction,
+        transactionKind: uniqueKinds.length === 1 ? uniqueKinds[0] : undefined,
+        technicalType: input.technicalType,
+        exceptionTransactionIds: input.exceptionTransactionIds,
+      },
+    }));
+    setBulkRuleOpen(false);
+  }
+
   const syncLabel = syncState === 'saved' ? 'Salvo na nuvem' : syncState === 'saving' ? 'Salvando...' : syncState === 'offline' ? 'Modo local' : syncState === 'error' ? 'Falha de sincronização' : syncState === 'conflict' ? 'Conflito protegido' : 'Carregando';
 
   function askAssistant(question = assistantQuestion) {
@@ -952,9 +1051,7 @@ function FinanceApp({ session }: { session: Session }) {
       currency,
       question: clean,
       targetAccountId: assistantTargetAccountId || undefined,
-      range: month === 'all'
-        ? {}
-        : monthDateRange(month),
+      range: range ?? {},
     }));
     setAssistantQuestion(clean);
   }
@@ -1000,7 +1097,7 @@ function FinanceApp({ session }: { session: Session }) {
     }
   }
 
-  const categoryName = (categoryId?: string) => categoryId ? (financeState.categories.find((category) => category.id === categoryId)?.name ?? categoryId) : 'Sem categoria';
+  const categoryName = (categoryId?: string) => !categoryId || categoryId === 'uncategorized' ? 'Sem categoria' : (financeState.categories.find((category) => category.id === categoryId)?.name ?? categoryId);
   const reviewReasonLabel = (reason: ReviewReason) => ({
     uncategorized: 'sem categoria',
     unknown_kind: 'tipo desconhecido',
@@ -1011,36 +1108,108 @@ function FinanceApp({ session }: { session: Session }) {
     unlinked_refund: 'reembolso sem vínculo',
   } satisfies Record<ReviewReason, string>)[reason];
 
+  const parseFilterAmount = (value: string) => {
+    if (!value.trim()) return undefined;
+    try { return Math.abs(parseSignedMoneyToCents(value)); } catch { return undefined; }
+  };
+  const minimumFilterCents = parseFilterAmount(minAmount);
+  const maximumFilterCents = parseFilterAmount(maxAmount);
+  const invalidDateRange = Boolean(dateStart && dateEnd && dateStart > dateEnd);
+  const invalidMinimumAmount = Boolean(minAmount.trim() && minimumFilterCents === undefined);
+  const invalidMaximumAmount = Boolean(maxAmount.trim() && maximumFilterCents === undefined);
+  const invalidAmountRange = minimumFilterCents !== undefined && maximumFilterCents !== undefined && minimumFilterCents > maximumFilterCents;
+  const invalidFilters = invalidDateRange || invalidMinimumAmount || invalidMaximumAmount || invalidAmountRange;
+  const filtersActive = Boolean(query || accountFilter !== 'all' || categoryFilter !== 'all' || month !== 'all'
+    || dateStart || dateEnd || minAmount || maxAmount || directionFilter !== 'all'
+    || technicalTypeFilter !== 'all' || sourceFilter !== 'all' || reviewOnly);
+  const latestActiveDecision = financeState.reviewDecisions.find((item) => !item.undoneAt);
+  const comparisonAnalytics = analytics.current.effectiveEnd < analytics.current.range.end
+    ? buildAnalytics(financeState, currency, {
+        start: analytics.current.range.start,
+        end: analytics.current.effectiveEnd,
+      })
+    : analytics;
+  const comparison = buildPeriodComparison(
+    comparisonAnalytics,
+    categoryName,
+    (amountCents) => formatMoney(amountCents, currency),
+  );
+  const activityTimeline = buildActivityTimeline(financeState, currency, accountName);
+  const sourceLabel = (source: Transaction['source']) => ({
+    revolut_csv: 'Revolut CSV',
+    wise_csv: 'Wise CSV',
+    revolut_pdf: 'Revolut PDF',
+    manual: 'Manual',
+  } satisfies Record<Transaction['source'], string>)[source];
+
   const renderTransactions = (items = filtered, reviewMode = false) => <section className="panel transaction-panel">
     <div className="panel-title"><div><h2>{reviewMode ? 'Movimentações para revisar' : 'Movimentações'}</h2><small>{reviewMode ? 'Corrija somente o que ficou ambíguo.' : 'Do mais recente para o mais antigo.'}</small></div><span>{items.length}</span></div>
-    {!reviewMode && <section className="toolbar compact-toolbar">
-      <label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comerciante ou nota" /></label>
-      <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)}><option value="all">Todas as contas</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select>
-      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Todas as categorias</option><option value="uncategorized">Sem categoria</option>{financeState.categories.filter((category) => category.active).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
-      <select value={month} onChange={(event) => setMonth(event.target.value)}><option value="all">Todo o histórico</option>{months.map((item) => <option key={item} value={item}>{item}</option>)}</select>
-      {(query || accountFilter !== 'all' || categoryFilter !== 'all' || month !== 'all') && <button className="secondary filter-reset" onClick={() => { setQuery(''); setAccountFilter('all'); setCategoryFilter('all'); setMonth('all'); }}><X size={15} /> Limpar filtros</button>}
+    {!reviewMode && <section className="transaction-tools">
+      <section className="toolbar compact-toolbar">
+        <label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar descrição, comerciante, nota ou ID" /></label>
+        <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)}><option value="all">Todas as contas</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select>
+        <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Todas as categorias</option><option value="uncategorized">Sem categoria</option>{financeState.categories.filter((category) => category.active).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
+        <select value={month} onChange={(event) => { setMonth(event.target.value); setDateStart(''); setDateEnd(''); }}><option value="all">Todo o histórico</option>{months.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+      </section>
+      <details className="advanced-filters">
+        <summary><Filter size={16} /> Filtros avançados {filtersActive ? 'ativos' : ''}</summary>
+        <div className="advanced-filter-grid">
+          <label>De<input type="date" value={dateStart} onChange={(event) => { setDateStart(event.target.value); setMonth('all'); }} /></label>
+          <label>Até<input type="date" value={dateEnd} onChange={(event) => { setDateEnd(event.target.value); setMonth('all'); }} /></label>
+          <label>Valor mínimo<input inputMode="decimal" value={minAmount} onChange={(event) => setMinAmount(event.target.value)} placeholder="0,00" /></label>
+          <label>Valor máximo<input inputMode="decimal" value={maxAmount} onChange={(event) => setMaxAmount(event.target.value)} placeholder="sem limite" /></label>
+          <label>Direção<select value={directionFilter} onChange={(event) => setDirectionFilter(event.target.value as 'all' | Transaction['direction'])}><option value="all">Entradas e saídas</option><option value="inflow">Entradas</option><option value="outflow">Saídas</option></select></label>
+          <label>Tipo técnico<select value={technicalTypeFilter} onChange={(event) => setTechnicalTypeFilter(event.target.value as 'all' | TechnicalMovementType)}><option value="all">Todos os tipos</option>{TECHNICAL_TYPES.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select></label>
+          <label>Origem<select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as 'all' | Transaction['source'])}><option value="all">Todas as origens</option>{(['revolut_csv','wise_csv','revolut_pdf','manual'] as Transaction['source'][]).map((source) => <option key={source} value={source}>{sourceLabel(source)}</option>)}</select></label>
+          <label className="check-row review-only"><input type="checkbox" checked={reviewOnly} onChange={(event) => setReviewOnly(event.target.checked)} /> Somente pendências</label>
+        </div>
+        {invalidDateRange && <p className="filter-warning">A data inicial precisa ser anterior ou igual à data final.</p>}
+        {(invalidMinimumAmount || invalidMaximumAmount) && <p className="filter-warning">Use um valor numérico válido nos limites do filtro.</p>}
+        {invalidAmountRange && <p className="filter-warning">O valor mínimo precisa ser menor ou igual ao valor máximo.</p>}
+      </details>
+      <div className="transaction-actions">
+        <button className="secondary" onClick={() => setBulkRuleOpen(true)} disabled={filtered.length === 0 || invalidFilters}><WandSparkles size={16} /> Criar regra com prévia</button>
+        <button className="secondary" onClick={exportFilteredCsv} disabled={filtered.length === 0 || invalidFilters}><FileDown size={16} /> Exportar estes {filtered.length}</button>
+        {filtersActive && <button className="secondary filter-reset" onClick={clearTransactionFilters}><X size={15} /> Limpar filtros</button>}
+      </div>
+      {latestActiveDecision?.kind === 'create_rule' && <div className="bulk-undo-banner"><span>{latestActiveDecision.label}</span><button className="link-button" onClick={undoReviewDecision}><RotateCcw size={14} /> Desfazer</button></div>}
     </section>}
-    {items.length === 0 ? <div className="empty"><WalletCards size={32} /><p>{reviewMode ? 'Nenhuma movimentação precisa de revisão.' : 'Importe um extrato ou crie uma movimentação manual.'}</p></div> : <div className="tx-list">{items.map((transaction) => {
+    {items.length === 0 ? <div className="empty"><WalletCards size={32} /><p>{reviewMode ? 'Nenhuma movimentação precisa de revisão.' : filtersActive ? 'Nenhuma movimentação corresponde aos filtros atuais.' : 'Importe um extrato ou crie uma movimentação manual.'}</p></div> : <div className="tx-list">{items.map((transaction) => {
       const categoryOptions = financeState.categories.filter((category) => isCategoryCompatible(category, transaction));
       const technicalOptions = technicalTypesForDirection(transaction.direction);
-      return <article className={`tx ${transaction.needsReview ? 'needs-review' : ''}`} key={transaction.id}>
-        <div className="tx-main"><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {categoryName(transaction.categoryId)}</small>{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</div>
-        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={!isCategoryReviewApplicable(transaction.technicalType)}><option value="">Sem categoria</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
-        <strong className={signedNetMovement(transaction) > 0 ? 'positive' : ''}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong>
+      const reverted = transaction.status === 'reverted';
+      const displayedMovement = reverted
+        ? (transaction.reportedAmountCents ?? (transaction.direction === 'inflow' ? transaction.amountCents : -transaction.amountCents))
+        : signedNetMovement(transaction);
+      return <article className={`tx ${transaction.needsReview ? 'needs-review' : ''} ${reverted ? 'reverted' : ''}`} key={transaction.id}>
+        <div className="tx-main"><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : categoryName(transaction.categoryId)}</small>{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</div>
+        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || !isCategoryReviewApplicable(transaction.technicalType)}><option value="">Sem categoria</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
+        <strong className={`${displayedMovement > 0 ? 'positive' : ''} ${reverted ? 'reverted-amount' : ''}`}>{displayedMovement < 0 ? '-' : '+'}{formatMoney(Math.abs(displayedMovement), transaction.currency)}{reverted && <small>revertida</small>}</strong>
       </article>;
     })}</div>}
   </section>;
 
-  const homeStatus = criticalPendingCount > 0
-    ? { label: 'RESULTADO PROVISÓRIO', title: 'Há dados para revisar', tone: 'attention' }
-    : !reconciledPosition
-      ? { label: 'SALDO AINDA NÃO RECONCILIADO', title: 'Falta confirmar a posição atual', tone: 'neutral' }
-      : homeLimit?.status === 'unsafe'
-        ? { label: 'ATENÇÃO', title: 'Sua margem está apertada', tone: 'warning' }
-        : { label: 'SITUAÇÃO ATUAL', title: 'Você está dentro do planejado', tone: 'positive' };
   const nextEventDays = nextPlannedEvent ? civilDaysBetween(today, nextPlannedEvent.dueDate) : undefined;
   const categoryRows = analytics.current.byCategory.slice(0, 5);
-  const recentTransactions = visibleTransactions.filter((transaction) => transaction.currency === currency).slice(0, 5);
+  const periodTransactionIds = new Set(analytics.current.transactions.map((transaction) => transaction.id));
+  const periodCriticalPendingCount = analytics.current.transactions.filter((transaction) => transaction.needsReview).length
+    + unresolvedIssues.filter((issue) => Boolean(issue.transactionId && periodTransactionIds.has(issue.transactionId))).length;
+  const analysisPeriodLabel = `${formatReportingDate(analytics.current.range.start)} a ${formatReportingDate(analytics.current.range.end)}`;
+  const homeStatus = periodCriticalPendingCount > 0
+    ? { label: 'ANÁLISE DO PERÍODO PROVISÓRIA', title: 'Há dados deste período para revisar', tone: 'attention' }
+    : criticalPendingCount > 0
+      ? { label: 'REVISÃO PENDENTE', title: 'Há itens fora deste período para revisar', tone: 'attention' }
+      : !reconciledPosition
+        ? { label: 'SALDO AINDA NÃO RECONCILIADO', title: 'Falta confirmar a posição atual', tone: 'neutral' }
+        : homeLimit?.status === 'unsafe'
+          ? { label: 'ATENÇÃO', title: 'Sua margem está apertada', tone: 'warning' }
+          : { label: 'SITUAÇÃO ATUAL', title: 'Você está dentro do planejado', tone: 'positive' };
+  const recentTransactions = visibleTransactions
+    .filter((transaction) => transaction.status === 'completed'
+      && transaction.currency === currency
+      && transaction.reportingDate >= analytics.current.range.start
+      && transaction.reportingDate <= analytics.current.range.end)
+    .slice(0, 5);
 
   return (
     <main className="app-shell">
@@ -1052,7 +1221,7 @@ function FinanceApp({ session }: { session: Session }) {
 
         <section className={`financial-status ${homeStatus.tone}`}>
           <div className="status-orb"><Sparkles size={22} /></div>
-          <div><small>{homeStatus.label}</small><h2>{homeStatus.title}</h2><p>{criticalPendingCount > 0 ? `${criticalPendingCount} ${criticalPendingCount === 1 ? 'item precisa' : 'itens precisam'} da sua ajuda antes de uma conclusão definitiva.` : reconciledPosition ? `Posição reconciliada em ${new Date(reconciledPosition.logicalAsOf).toLocaleString('pt-IE')}.${pendingReviewGroupCount > 0 ? ` ${pendingReviewGroupCount} ${pendingReviewGroupCount === 1 ? 'grupo opcional pode' : 'grupos opcionais podem'} melhorar categorias e insights.` : ''}` : 'Atualize os saldos das contas para liberar limites e previsões confiáveis.'}</p></div>
+          <div><small>{homeStatus.label}</small><h2>{homeStatus.title}</h2><p>{periodCriticalPendingCount > 0 ? `${periodCriticalPendingCount} ${periodCriticalPendingCount === 1 ? 'item deste período precisa' : 'itens deste período precisam'} da sua ajuda.` : criticalPendingCount > 0 ? `${criticalPendingCount} ${criticalPendingCount === 1 ? 'item permanece' : 'itens permanecem'} pendente fora do intervalo exibido; o fluxo atual não depende deles.` : reconciledPosition ? `Posição reconciliada em ${new Date(reconciledPosition.logicalAsOf).toLocaleString('pt-IE')}.${pendingReviewGroupCount > 0 ? ` ${pendingReviewGroupCount} ${pendingReviewGroupCount === 1 ? 'grupo opcional pode' : 'grupos opcionais podem'} melhorar categorias e insights.` : ''}` : 'Atualize os saldos das contas para liberar limites e previsões confiáveis.'}</p></div>
           {criticalPendingCount > 0 ? <button className="link-button" onClick={() => setActiveTab('review')}>Revisar</button> : !reconciledPosition ? <button className="link-button" onClick={recordBalanceSnapshot}>Atualizar saldos</button> : pendingReviewGroupCount > 0 ? <button className="link-button" onClick={() => setActiveTab('review')}>Melhorar categorias</button> : null}
         </section>
 
@@ -1072,9 +1241,9 @@ function FinanceApp({ session }: { session: Session }) {
         </section>
 
         <section className="panel flow-panel">
-          <div className="panel-title"><div><small>FLUXO DO PERÍODO</small><h2>{criticalPendingCount ? 'Resultado provisório' : 'O que entrou e saiu'}</h2></div><ChartNoAxesCombined size={22} /></div>
-          <div className="flow-breakdown"><article><small>De onde veio</small><b className="positive">{formatMoney(analytics.current.summary.incomeCents, currency)}</b></article><article><small>No que saiu</small><b>{formatMoney(analytics.current.summary.netExpenseCents, currency)}</b></article><article><small>O que sobrou</small><b className={analytics.current.summary.netCashflowCents >= 0 ? 'positive' : ''}>{formatMoney(analytics.current.summary.netCashflowCents, currency)}</b></article></div>
-          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Não classificadas</small><b>{analytics.current.unknownTransactionCount}</b></span></div><p>Transferências internas e conversões ficam fora do fluxo. Transferências externas entram como entrada ou saída conforme a direção. O saldo reconciliado é mostrado separadamente porque saldo e movimento não são a mesma coisa, apesar de aplicativos adorarem fingir que são.</p></details>
+          <div className="panel-title"><div><small>FLUXO DO PERÍODO · {analysisPeriodLabel}</small><h2>Resultado do fluxo{periodCriticalPendingCount > 0 ? ' provisório' : ''}</h2></div><ChartNoAxesCombined size={22} /></div>
+          <div className="flow-breakdown"><article><small>Entradas externas</small><b className="positive">{formatMoney(analytics.current.summary.incomeCents, currency)}</b></article><article><small>Saídas externas líquidas</small><b>{formatMoney(analytics.current.summary.netExpenseCents, currency)}</b></article><article><small>Resultado do fluxo</small><b className={analytics.current.summary.netCashflowCents >= 0 ? 'positive' : ''}>{formatMoney(analytics.current.summary.netCashflowCents, currency)}</b></article></div>
+          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Este resultado cobre {analysisPeriodLabel}. Transferências internas e conversões ficam fora do fluxo; as comissões bancárias entram como despesas separadas. Transferências externas entram conforme a direção. Isso não é o saldo da conta: saldo é uma posição, fluxo é a soma dos movimentos do período.</p></details>
         </section>
 
         {nextPlannedEvent && <section className="next-event-card"><div className="event-icon"><CalendarClock size={21} /></div><div><small>PRÓXIMO COMPROMISSO</small><h3>{nextPlannedEvent.title}</h3><p>{nextEventDays === 0 ? 'Hoje' : nextEventDays === 1 ? 'Amanhã' : `Em ${nextEventDays} dias`} · {nextPlannedEvent.direction === 'outflow' ? 'saída' : 'entrada'}</p></div><strong>{nextPlannedEvent.direction === 'outflow' ? '-' : '+'}{formatMoney(nextPlannedEvent.amountCents, currency)}</strong></section>}
@@ -1091,11 +1260,37 @@ function FinanceApp({ session }: { session: Session }) {
 
       {activeTab === 'transactions' && renderTransactions()}
 
-      {activeTab === 'discoveries' && <section className="discoveries-page"><span className="eyebrow">DESCOBERTAS</span><h1>Seu dinheiro<br />devolvendo contexto.</h1><p>O motor encontrou {insightResult.generatedCount} análises candidatas e selecionou {insightResult.eligibleCount} que passaram pelos critérios de relevância, confiança e repetição.</p><div className="discoveries-summary"><article><Sparkles size={21} /><div><b>{insightResult.insights.length}</b><small>visíveis agora</small></div></article><article><ChartNoAxesCombined size={21} /><div><b>{analytics.current.expenseTransactionCount}</b><small>despesas analisadas</small></div></article><article><CalendarClock size={21} /><div><b>{analytics.current.observedDays}</b><small>dias observados</small></div></article></div><div className="insight-stack discoveries-stack">{insightResult.insights.map((insight) => <InsightCard key={insight.key} insight={insight} onAction={openInsightAction} onUseful={(item) => updateInsightFeedback(item, { useful: true, lastShownAt: new Date().toISOString() })} onDismiss={(item) => updateInsightFeedback(item, { dismissedAt: new Date().toISOString() })} />)}</div></section>}
+      {activeTab === 'discoveries' && <section className="discoveries-page">
+        <span className="eyebrow">DESCOBERTAS</span>
+        <h1>Seu dinheiro<br />devolvendo contexto.</h1>
+        <p>O motor encontrou {insightResult.generatedCount} análises candidatas e selecionou {insightResult.eligibleCount} que passaram pelos critérios de relevância, confiança e repetição.</p>
+        <div className="discoveries-summary"><article><Sparkles size={21} /><div><b>{insightResult.insights.length}</b><small>visíveis agora</small></div></article><article><ChartNoAxesCombined size={21} /><div><b>{analytics.current.expenseTransactionCount}</b><small>despesas analisadas</small></div></article><article><CalendarClock size={21} /><div><b>{analytics.current.observedDays}</b><small>dias observados</small></div></article></div>
+
+        <section className="panel comparison-panel">
+          <div className="panel-title"><div><small>COMPARAÇÃO EQUIVALENTE</small><h2>Período atual x anterior</h2></div><ChartNoAxesCombined size={21} /></div>
+          <p className="comparison-range">{formatReportingDate(comparison.currentRange.start)} a {formatReportingDate(comparison.currentRange.end)} <span>contra</span> {formatReportingDate(comparison.previousRange.start)} a {formatReportingDate(comparison.previousRange.end)}</p>
+          {comparison.comparable && <div className="comparison-metrics">{comparison.metrics.map((metric) => {
+            const improved = metric.favorableWhenLower ? metric.differenceCents < 0 : metric.differenceCents > 0;
+            const comparisonTone = metric.differenceCents === 0 ? 'neutral' : improved ? 'positive' : 'negative';
+            const differencePrefix = metric.differenceCents === 0 ? '' : metric.differenceCents > 0 ? '+' : '-';
+            return <article key={metric.label}><small>{metric.label}</small><strong>{formatMoney(metric.currentCents, currency)}</strong><span className={comparisonTone}>{differencePrefix}{formatMoney(Math.abs(metric.differenceCents), currency)}{metric.percentChange !== undefined ? ` · ${Math.round(metric.percentChange * 100)}%` : ''}</span><em>anterior: {formatMoney(metric.previousCents, currency)}</em></article>;
+          })}</div>}
+          <div className="comparison-explanations">{comparison.explanations.map((explanation) => <article className={explanation.tone} key={explanation.id}><b>{explanation.title}</b><p>{explanation.body}</p></article>)}</div>
+          {comparison.comparable && <small className="comparison-note">Os dois lados usam a mesma quantidade de dias observados.</small>}
+        </section>
+
+        <div className="insight-stack discoveries-stack">{insightResult.insights.map((insight) => <InsightCard key={insight.key} insight={insight} onAction={openInsightAction} onUseful={(item) => updateInsightFeedback(item, { useful: true, lastShownAt: new Date().toISOString() })} onDismiss={(item) => updateInsightFeedback(item, { dismissedAt: new Date().toISOString() })} />)}</div>
+      </section>}
 
       {activeTab === 'assistant' && <section className="assistant-page"><span className="eyebrow">ASSISTENTE DETERMINÍSTICO</span><h1>Converse com<br />seus números.</h1><p>Ele não inventa saldo nem usa IA para decidir. O motor responde a partir da reconciliação, do forecast e dos compromissos cadastrados.</p><label className="assistant-account-selector">Conta-alvo<select aria-label="Conta-alvo do assistente" value={assistantTargetAccountId} onChange={(event) => setAssistantTargetAccountId(event.target.value)}><option value="">Selecione uma conta</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><div className="prompt-grid">{['Onde foi meu dinheiro este mês?','Posso comprar uma TV de €600?','Quanto posso gastar até o pagamento?','Há cobranças duplicadas?'].map((prompt) => <button className="prompt-card" key={prompt} onClick={() => { setAssistantQuestion(prompt); askAssistant(prompt); }}>{prompt}</button>)}</div>{assistantAnswer && <div className={`assistant-answer ${assistantAnswer.status ?? ''}`}><b>JF</b><p>{assistantAnswer.answer}</p>{assistantAnswer.evidence.length > 0 && <ul>{assistantAnswer.evidence.map((item) => <li key={item}>{item}</li>)}</ul>}<small>Confiança {assistantAnswer.confidence === 'high' ? 'alta' : assistantAnswer.confidence === 'medium' ? 'média' : 'baixa'} · escopo: {assistantAnswer.dataScope ?? 'estado financeiro'} · {currency}</small></div>}<div className="assistant-input"><input value={assistantQuestion} onChange={(event) => setAssistantQuestion(event.target.value)} placeholder="Pergunte sobre seu dinheiro" onKeyDown={(event) => event.key === 'Enter' && askAssistant()} /><button onClick={() => askAssistant()}><Send size={18} /></button></div></section>}
 
-      {activeTab === 'accounts' && <section className="settings-page"><span className="eyebrow">MAIS</span><h1>Configurações<br />sem caça ao menu.</h1><div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name}</option>)}</select><button onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise ou PDF Revolut digital. A prévia explica o que foi reconhecido antes de gravar.</small></div><div className="settings-actions"><button className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount > 0 ? `(${pendingCount})` : ''}</button><button className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div><section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section></section>}
+      {activeTab === 'accounts' && <section className="settings-page">
+        <span className="eyebrow">MAIS</span><h1>Configurações<br />sem caça ao menu.</h1>
+        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name}</option>)}</select><button onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise ou PDF Revolut digital. A prévia explica o que foi reconhecido antes de gravar.</small></div>
+        <div className="settings-actions"><button className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount > 0 ? `(${pendingCount})` : ''}</button><button className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
+        <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
+      </section>}
 
       {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
         <ReviewGroupsPanel groups={currencyReviewGroups} transactions={visibleTransactions} categories={financeState.categories} apply={applyReviewGroup} resolveWithoutCategory={resolveReviewGroupWithoutCategory} defer={postponeReviewGroup} reopen={reactivateReviewGroup} applyOne={applyReviewException} />
@@ -1117,6 +1312,7 @@ function FinanceApp({ session }: { session: Session }) {
       {plannedEventOpen && <PlannedEventModal accounts={activeAccounts} currency={currency} close={() => setPlannedEventOpen(false)} save={(plannedEvent) => { setState({ ...financeState, plannedEvents: [...financeState.plannedEvents, plannedEvent] }); setPlannedEventOpen(false); }} />}
       {categoryOpen && <CategoryManagerModal categories={financeState.categories} rules={financeState.rules} transactionCountByCategory={transactionCountByCategory} close={() => setCategoryOpen(false)} create={createCategory} rename={renameCategory} archive={archiveCategory} restore={restoreCategory} removeRule={removeCategoryRule} />}
       {merchantLearning && <MerchantLearningModal transaction={merchantLearning.transaction} category={merchantLearning.category} close={() => setMerchantLearning(null)} remember={rememberMerchantRule} />}
+      {bulkRuleOpen && <BulkRuleModal candidates={filtered} categories={financeState.categories} currency={currency} close={() => setBulkRuleOpen(false)} apply={applyBulkRule} />}
     </main>
   );
 
@@ -1256,7 +1452,7 @@ function ImportPreview({ preview, includePossibleDuplicates, setIncludePossibleD
     <div className="preview-explainer"><b>O que o app entendeu</b><p>Transferências internas e conversões ficam fora do fluxo. Transferências externas contam pela direção, e reembolsos reduzem as saídas. O que continuar ambíguo será perguntado depois, sem sumir discretamente num porão contábil.</p></div>
     <div className="preview-smart-grid"><div><b>{technicallyIdentified}</b><small>tipos identificados</small></div><div><b>{internalTransfers}</b><small>internas ou conversões</small></div><div><b>{refunds}</b><small>reembolsos</small></div><div><b>{withoutCategory}</b><small>para revisar em grupos</small></div></div>
     <div className="preview-grid"><div><b>{preview.newTransactions.length}</b><small>novas</small></div><div><b>{preview.confirmedDuplicateIds.length}</b><small>duplicatas certas</small></div><div><b>{preview.possibleDuplicates.length}</b><small>possíveis</small></div><div><b>{preview.issues.length}</b><small>pendências técnicas</small></div></div>
-    {preview.currencies.map((item) => <div className={`reconciliation ${item.reconciliation}`} key={item.currency}><b>{item.currency}</b><span>Entradas {formatMoney(item.inflowCents, item.currency)}</span><span>Saídas {formatMoney(item.outflowCents, item.currency)}</span><span>{item.reconciliation === 'reconciled' ? 'Saldo reconciliado' : item.reconciliation === 'mismatch' ? `Diferença ${formatMoney(item.reconciliationDifferenceCents ?? 0, item.currency)}` : 'Extrato sem saldo suficiente para reconciliar'}</span></div>)}
+    {preview.currencies.map((item) => <div className={`reconciliation ${item.reconciliation}`} key={item.key}><b>{item.label}</b><span>Entradas {formatMoney(item.inflowCents, item.currency)}</span><span>Saídas {formatMoney(item.outflowCents, item.currency)}</span><span>{item.reconciliation === 'reconciled' ? 'Livro de saldo reconciliado' : item.reconciliation === 'mismatch' ? `Diferença ${formatMoney(item.reconciliationDifferenceCents ?? 0, item.currency)}` : 'Livro sem saldo suficiente para reconciliar'}</span></div>)}
     {preview.issues.length > 0 && <details open><summary>Linhas que exigem atenção</summary>{preview.issues.slice(0, 12).map((item) => <p key={item.id}>• {item.message}</p>)}</details>}
     {preview.possibleDuplicates.length > 0 && <label className="duplicate-choice"><input type="checkbox" checked={includePossibleDuplicates} onChange={(event) => setIncludePossibleDuplicates(event.target.checked)} /><span>Importar também as possíveis duplicatas. Elas continuarão marcadas para revisão.</span></label>}
     {preview.blockingIssueCount > 0 && <label className="duplicate-choice danger"><input type="checkbox" checked={allowPartial} onChange={(event) => setAllowPartial(event.target.checked)} /><span>Confirmar importação parcial mesmo com {preview.blockingIssueCount} linha(s) rejeitada(s). Os problemas serão preservados na lista de pendências.</span></label>}

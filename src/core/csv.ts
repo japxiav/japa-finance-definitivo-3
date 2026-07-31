@@ -16,12 +16,16 @@ import type {
   PossibleDuplicate,
   ReviewReason,
   Transaction,
+  TransactionStatus,
 } from './types';
 
-export const PARSER_VERSION = '0.6.0';
+export const PARSER_VERSION = '0.7.0';
 
 export interface CurrencyPreview {
+  key: string;
   currency: string;
+  product?: string;
+  label: string;
   inflowCents: number;
   outflowCents: number;
   netCents: number;
@@ -218,35 +222,57 @@ function addReason(reasons: ReviewReason[], reason: ReviewReason) {
 }
 
 function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
-  const currencies = [...new Set(transactions.map((transaction) => transaction.currency))];
-  return currencies.map((currency) => {
-    const relevant = transactions
-      .filter((transaction) => transaction.currency === currency)
+  const ledgerMap = new Map<string, Transaction[]>();
+  for (const transaction of transactions) {
+    const product = transaction.bankProduct?.trim() || 'Conta principal';
+    const key = `${transaction.currency}|${product}`;
+    const ledger = ledgerMap.get(key) ?? [];
+    ledger.push(transaction);
+    ledgerMap.set(key, ledger);
+  }
+
+  return [...ledgerMap.entries()].map(([key, ledger]): CurrencyPreview => {
+    const relevant = ledger
+      .filter((transaction) => transaction.status === 'completed' || transaction.status === 'reverted');
+    const primaryRows = relevant
+      .filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary')
       .sort((a, b) => {
         const dateA = a.completedAt ?? a.startedAt ?? `${a.reportingDate}T00:00:00`;
         const dateB = b.completedAt ?? b.startedAt ?? `${b.reportingDate}T00:00:00`;
         return dateA.localeCompare(dateB) || (a.sourceRowNumber ?? 0) - (b.sourceRowNumber ?? 0);
       });
-    const netMovements = relevant.map((item) =>
-      item.netMovementCents ?? (item.direction === 'inflow' ? item.amountCents : -item.amountCents),
-    );
-      const inflowCents = netMovements.filter((value) => value > 0).reduce((sum, value) => addCents(sum, value), 0);
-    const outflowCents = netMovements.filter((value) => value < 0).reduce((sum, value) => addCents(sum, Math.abs(value)), 0);
-    const netCents = netMovements.reduce((sum, value) => addCents(sum, value), 0);
+    const currency = primaryRows[0]?.currency ?? relevant[0]?.currency ?? key.split('|')[0]!;
+    const product = primaryRows[0]?.bankProduct?.trim() || relevant[0]?.bankProduct?.trim() || undefined;
+    const label = product ? `${currency} · ${product}` : currency;
+    const movements = relevant
+      .filter((transaction) => transaction.status === 'completed')
+      .map((transaction) => transaction.netMovementCents
+        ?? (transaction.direction === 'inflow' ? transaction.amountCents : -transaction.amountCents));
+    const inflowCents = movements.filter((value) => value > 0).reduce((sum, value) => addCents(sum, value), 0);
+    const outflowCents = movements.filter((value) => value < 0).reduce((sum, value) => addCents(sum, Math.abs(value)), 0);
+    const netCents = movements.reduce((sum, value) => addCents(sum, value), 0);
 
-    if (!relevant.length || relevant.some((item) => item.balanceAfterCents === undefined)) {
-      return { currency, inflowCents, outflowCents, netCents, reconciliation: 'unavailable' };
+    const balanceRows = primaryRows.filter((item) => item.status === 'completed' && item.balanceAfterCents !== undefined);
+    if (!balanceRows.length) {
+      return { key, currency, product, label, inflowCents, outflowCents, netCents, reconciliation: 'unavailable' };
     }
-    const first = relevant[0];
-    const last = relevant.at(-1)!;
-    const firstSigned = first.netMovementCents
-      ?? (first.direction === 'inflow' ? first.amountCents : -first.amountCents);
-    const openingBalance = subtractCents(first.balanceAfterCents!, firstSigned);
+
+    const first = balanceRows[0]!;
+    const last = balanceRows.at(-1)!;
+    const firstRowMovement = relevant
+      .filter((item) => item.status === 'completed'
+        && item.sourceRowNumber === first.sourceRowNumber)
+      .reduce((sum, item) => addCents(sum, item.netMovementCents
+        ?? (item.direction === 'inflow' ? item.amountCents : -item.amountCents)), 0);
+    const openingBalance = subtractCents(first.balanceAfterCents!, firstRowMovement);
     const calculatedEndBalanceCents = addCents(openingBalance, netCents);
     const statementEndBalanceCents = last.balanceAfterCents!;
     const reconciliationDifferenceCents = subtractCents(statementEndBalanceCents, calculatedEndBalanceCents);
     return {
+      key,
       currency,
+      product,
+      label,
       inflowCents,
       outflowCents,
       netCents,
@@ -255,7 +281,13 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
       reconciliationDifferenceCents,
       reconciliation: reconciliationDifferenceCents === 0 ? 'reconciled' : 'mismatch',
     };
-  });
+  }).sort((a, b) => a.currency.localeCompare(b.currency) || a.label.localeCompare(b.label));
+}
+
+function transactionStatusFromBankState(raw: string): TransactionStatus {
+  if (/revert|reversal|reversed|revertida|revertido|estornada|estornado/i.test(raw)) return 'reverted';
+  if (/pending|processing|waiting|pendente|processando|aguardando/i.test(raw)) return 'pending';
+  return 'completed';
 }
 
 function issue(params: Omit<ImportIssue, 'id' | 'createdAt' | 'status'> & { status?: ImportIssue['status'] }): ImportIssue {
@@ -330,7 +362,8 @@ export async function previewBankCsv(
         return;
       }
 
-      if (/pending|processing|waiting|pendente|processando|aguardando/i.test(bankState)) {
+      const transactionStatus = transactionStatusFromBankState(bankState);
+      if (transactionStatus === 'pending') {
         issues.push(issue({
           importId,
           accountId,
@@ -342,30 +375,22 @@ export async function previewBankCsv(
         return;
       }
 
-      const feeRaw = get(row, ['Fee', 'Source fee amount', 'Taxa', 'Valor da taxa de origem']);
+      const feeRaw = get(row, ['Fee', 'Commission', 'Source fee amount', 'Taxa', 'Comissão', 'Valor da taxa de origem']);
       const balanceRaw = get(row, ['Balance', 'Running balance', 'Saldo', 'Saldo corrente']);
       const feeCents = feeRaw.trim() ? parseMoneyToCents(feeRaw) : undefined;
       const feeTreatment = feeTreatmentForParser(parserName);
       const reportedAmountCents = amount.signedCents;
-      const netMovementCents = normalizeNetMovementCents({
-        reportedAmountCents,
-        feeCents: feeCents ?? 0,
-        feeTreatment,
-      });
+      const primaryNetMovementCents = transactionStatus === 'reverted' ? 0 : reportedAmountCents;
       const balanceAfterCents = balanceRaw.trim() ? parseSignedMoneyToCents(balanceRaw) : undefined;
-      const direction: Direction = netMovementCents < 0
-        ? 'outflow'
-        : netMovementCents > 0
-          ? 'inflow'
-          : reportedDirection;
+      const direction: Direction = reportedDirection;
       const technical = identifyTechnicalMovement({ bankType, description, direction });
       const { kind, technicalType } = technical;
-      const matchedRule = matchRule(description, state.rules, {
+      const matchedRule = transactionStatus === 'completed' ? matchRule(description, state.rules, {
         currency: amount.currency,
         direction,
         kind,
         technicalType,
-      });
+      }) : undefined;
       const ruleCategory = matchedRule
         ? state.categories.find((category) => category.id === matchedRule.categoryId)
         : undefined;
@@ -373,19 +398,25 @@ export async function previewBankCsv(
         ? matchedRule
         : undefined;
       const reviewReasons: ReviewReason[] = [];
-      if (technicalType === 'unknown') addReason(reviewReasons, 'unknown_kind');
-      if (kind === 'refund') addReason(reviewReasons, 'unlinked_refund');
-      if (amountCents === 0) addReason(reviewReasons, 'zero_amount');
-      if (feeCents) addReason(reviewReasons, 'unverified_fee');
+      if (transactionStatus === 'completed') {
+        if (technicalType === 'unknown') addReason(reviewReasons, 'unknown_kind');
+        if (kind === 'refund') addReason(reviewReasons, 'unlinked_refund');
+        if (amountCents === 0) addReason(reviewReasons, 'zero_amount');
+      }
 
-      const automaticIncome = technicalType === 'salary' || technicalType === 'other_income';
-      const categoryId = automaticIncome ? 'income' : rule?.categoryId;
-      const categorySource = automaticIncome ? 'system' : rule ? 'rule' : 'none';
-      const categoryReviewStatus = categoryId
-        ? 'resolved' as const
-        : isCategoryReviewApplicable(technicalType)
-          ? 'pending' as const
-          : 'not_applicable' as const;
+      const automaticIncome = transactionStatus === 'completed'
+        && (technicalType === 'salary' || technicalType === 'other_income');
+      const categoryId = transactionStatus === 'completed'
+        ? (automaticIncome ? 'income' : rule?.categoryId)
+        : undefined;
+      const categorySource = categoryId ? (automaticIncome ? 'system' as const : 'rule' as const) : 'none' as const;
+      const categoryReviewStatus = transactionStatus !== 'completed'
+        ? 'not_applicable' as const
+        : categoryId
+          ? 'resolved' as const
+          : isCategoryReviewApplicable(technicalType)
+            ? 'pending' as const
+            : 'not_applicable' as const;
 
       const seed = {
         accountId,
@@ -404,9 +435,10 @@ export async function previewBankCsv(
       const occurrence = (occurrenceByBase.get(base) ?? 0) + 1;
       occurrenceByBase.set(base, occurrence);
       const dedupFingerprint = `${base}:${occurrence}`;
+      const primaryId = crypto.randomUUID();
 
       parsedTransactions.push({
-        id: crypto.randomUUID(),
+        id: primaryId,
         accountId,
         importId,
         bankTransactionId: get(row, ['Transaction ID', 'TransferWise ID', 'ID', 'Reference', 'Referência']) || undefined,
@@ -415,16 +447,17 @@ export async function previewBankCsv(
         sourceRowNumber: rowNumber,
         amountCents,
         reportedAmountCents,
-        netMovementCents,
+        netMovementCents: primaryNetMovementCents,
         feeCents,
         feeTreatment,
-        sourceFingerprint: `${fileHash}:${rowNumber}`,
+        sourceFingerprint: `${fileHash}:${rowNumber}:primary`,
+        sourceComponent: 'primary',
         semanticFingerprint: base,
         balanceAfterCents,
         currency: amount.currency,
         direction,
         source: parserName,
-        status: 'completed',
+        status: transactionStatus,
         kind,
         technicalType,
         kindSource: kind === 'unknown' ? 'unknown' : 'bank',
@@ -448,6 +481,51 @@ export async function previewBankCsv(
         createdAt,
         updatedAt: createdAt,
       });
+
+      if (transactionStatus === 'completed' && feeTreatment === 'ADDITIONAL_TO_REPORTED_AMOUNT' && feeCents && feeCents > 0) {
+        const feeBase = stableHash(`${base}|fee|${feeCents}`);
+        const feeDescription = `Comissão de ${description}`;
+        parsedTransactions.push({
+          id: crypto.randomUUID(),
+          accountId,
+          importId,
+          dedupFingerprint: `${feeBase}:1`,
+          sourceFileHash: fileHash,
+          sourceRowNumber: rowNumber,
+          amountCents: feeCents,
+          reportedAmountCents: -feeCents,
+          netMovementCents: -feeCents,
+          feeTreatment: 'INCLUDED_IN_REPORTED_AMOUNT',
+          sourceFingerprint: `${fileHash}:${rowNumber}:fee`,
+          sourceComponent: 'fee',
+          feeOfTransactionId: primaryId,
+          semanticFingerprint: feeBase,
+          currency: amount.currency,
+          direction: 'outflow',
+          source: parserName,
+          status: 'completed',
+          kind: 'expense',
+          technicalType: 'bank_fee',
+          kindSource: 'bank',
+          analysisExcluded: false,
+          descriptionOriginal: feeDescription,
+          merchantNormalized: normalizeMerchant(feeDescription),
+          bankType: 'Comissão',
+          bankProduct: bankProduct || undefined,
+          bankState: bankState || undefined,
+          startedAt: parsedStarted?.canonicalAt,
+          completedAt: parsedCompleted?.canonicalAt,
+          reportingDate: effectiveDate.reportingDate,
+          categorySource: 'none',
+          categoryReviewStatus: 'resolved',
+          needsReview: false,
+          reviewReasons: [],
+          manualEditLog: [],
+          originalData: row,
+          createdAt,
+          updatedAt: createdAt,
+        });
+      }
     } catch (error) {
       issues.push(issue({
         importId,
@@ -468,7 +546,7 @@ export async function previewBankCsv(
   const existingExactRows = new Map(
     state.transactions
       .filter((transaction) => transaction.sourceFileHash && transaction.sourceRowNumber)
-      .map((transaction) => [`${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}`, transaction.id]),
+      .map((transaction) => [`${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}|${transaction.sourceComponent ?? 'primary'}`, transaction.id]),
   );
   const existingByFingerprint = new Map<string, string[]>();
   for (const transaction of state.transactions) {
@@ -480,12 +558,13 @@ export async function previewBankCsv(
 
   const seenBankIds = new Set<string>();
   const confirmedDuplicateIds: string[] = [];
+  const confirmedDuplicateRows = new Set<number>();
   const newTransactions: Transaction[] = [];
   const possibleDuplicates: PossibleDuplicate[] = [];
 
   for (const transaction of parsedTransactions) {
     const bankKey = transaction.bankTransactionId ? `${transaction.accountId}|${transaction.bankTransactionId}` : undefined;
-    const sourceKey = `${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}`;
+    const sourceKey = `${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}|${transaction.sourceComponent ?? 'primary'}`;
     const existingBankMatch = bankKey ? existingBankIds.get(bankKey) : undefined;
     const repeatedBankIdInFile = bankKey ? seenBankIds.has(bankKey) : false;
     const exactSourceMatch = existingExactRows.get(sourceKey);
@@ -493,6 +572,7 @@ export async function previewBankCsv(
 
     if (existingBankMatch || repeatedBankIdInFile || exactSourceMatch) {
       confirmedDuplicateIds.push(existingBankMatch ?? exactSourceMatch ?? transaction.id);
+      if (transaction.sourceRowNumber) confirmedDuplicateRows.add(transaction.sourceRowNumber);
       continue;
     }
 
@@ -537,12 +617,12 @@ export async function previewBankCsv(
     createdAt,
     status: 'active',
     rowsRead: document.rows.length,
-    imported: newTransactions.length,
-    confirmedDuplicates: confirmedDuplicateIds.length,
-    possibleDuplicates: possibleDuplicates.length,
+    imported: newTransactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary').length,
+    confirmedDuplicates: confirmedDuplicateRows.size,
+    possibleDuplicates: new Set(possibleDuplicates.map((item) => item.transaction.sourceRowNumber).filter((row): row is number => Boolean(row))).size,
     pendingRows: issues.filter((item) => item.kind === 'pending').length,
     rejected: issues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch').length,
-    currencies: currencies.map((item) => item.currency),
+    currencies: [...new Set(currencies.map((item) => item.currency))],
     firstReportingDate: reportingDates[0],
     lastReportingDate: reportingDates.at(-1),
   };
@@ -562,21 +642,3 @@ function feeTreatmentForParser(parserName: ParserName): FeeTreatment {
     ? 'ADDITIONAL_TO_REPORTED_AMOUNT'
     : 'INCLUDED_IN_REPORTED_AMOUNT';
 }
-
-function normalizeNetMovementCents(input: {
-  reportedAmountCents: number;
-  feeCents: number;
-  feeTreatment: FeeTreatment;
-}): number {
-  const { reportedAmountCents, feeCents, feeTreatment } = input;
-  if (!Number.isSafeInteger(reportedAmountCents) || !Number.isSafeInteger(feeCents) || feeCents < 0) {
-    throw new Error('Movimento ou taxa inválidos.');
-  }
-  if (feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT' || feeCents === 0) {
-    return reportedAmountCents;
-  }
-  // Taxa adicional sempre reduz o saldo, independentemente da direção do valor reportado.
-  return subtractCents(reportedAmountCents, feeCents);
-}
-
-

@@ -73,7 +73,7 @@ describe('Revolut CSV', () => {
   });
 
 
-  it('normaliza taxa adicional no movimento líquido e reconcilia diferença zero', async () => {
+  it('separa taxa adicional como fato bancário próprio e reconcilia diferença zero', async () => {
     const csv = [
       header,
       'TRANSFER,Current,2026-07-01 09:00:00,2026-07-01 09:01:00,Entrada,100.00,,EUR,COMPLETED,1100.00,in-1',
@@ -83,10 +83,40 @@ describe('Revolut CSV', () => {
     const movement = preview.newTransactions.find((item) => item.bankTransactionId === 'out-1');
     expect(movement?.reportedAmountCents).toBe(-10000);
     expect(movement?.feeCents).toBe(220);
-    expect(movement?.netMovementCents).toBe(-10220);
+    expect(movement?.netMovementCents).toBe(-10000);
     expect(movement?.feeTreatment).toBe('ADDITIONAL_TO_REPORTED_AMOUNT');
+    const fee = preview.newTransactions.find((item) => item.sourceComponent === 'fee');
+    expect(fee?.technicalType).toBe('bank_fee');
+    expect(fee?.netMovementCents).toBe(-220);
+    expect(fee?.feeOfTransactionId).toBe(movement?.id);
+    expect(preview.batch.imported).toBe(2);
     expect(preview.currencies[0].reconciliationDifferenceCents).toBe(0);
     expect(preview.currencies[0].reconciliation).toBe('reconciled');
+  });
+
+
+
+  it('mapeia REVERTIDA sem criar despesa e preserva a linha para auditoria', async () => {
+    const csv = [
+      'Tipo,Produto,Data de início,Data de Conclusão,Descrição,Montante,Comissão,Moeda,Estado,Saldo',
+      'Pagamento com cartão,Atual,2026-06-12 10:00:00,2026-06-12 10:01:00,Chatgpt,-1.00,0.00,EUR,REVERTIDA,',
+    ].join('\n');
+    const preview = await previewRevolutCsv(csv, 'revertida.csv', initialState);
+    expect(preview.newTransactions[0].status).toBe('reverted');
+    expect(preview.newTransactions[0].netMovementCents).toBe(0);
+    expect(preview.newTransactions[0].needsReview).toBe(false);
+  });
+
+  it('reconcilia Atual e Poupanças como livros de saldo independentes', async () => {
+    const csv = [
+      'Tipo,Produto,Data de início,Data de Conclusão,Descrição,Montante,Comissão,Moeda,Estado,Saldo',
+      'Transferência,Atual,2026-07-01 10:00:00,2026-07-01 10:00:00,Carregamento de subconta EUR teste de EUR,-50.00,0.00,EUR,CONCLUÍDA,50.00',
+      'Transferência,Poupanças,2026-07-01 10:00:00,2026-07-01 10:00:00,Carregamento de subconta EUR teste de EUR,50.00,0.00,EUR,CONCLUÍDA,50.00',
+    ].join('\n');
+    const preview = await previewRevolutCsv(csv, 'produtos.csv', initialState);
+    expect(preview.currencies).toHaveLength(2);
+    expect(preview.currencies.map((item) => item.label)).toEqual(['EUR · Atual', 'EUR · Poupanças']);
+    expect(preview.currencies.every((item) => item.reconciliation === 'reconciled')).toBe(true);
   });
 
   it('mantém duas compras iguais no mesmo dia', async () => {
@@ -159,6 +189,16 @@ describe('Wise CSV', () => {
     expect(preview.batch.parserName).toBe('wise_csv');
     expect(preview.newTransactions[0].currency).toBe('BRL');
     expect(preview.newTransactions[0].amountCents).toBe(10000);
+  });
+
+
+  it('não duplica taxa da Wise quando o valor exportado já é líquido', async () => {
+    const csv = 'Date,Description,Amount,Currency,Running Balance,Status,ID,Fee\n03/07/2026,Compra com taxa,-102.20,BRL,147.80,COMPLETED,w-fee,2.20';
+    const preview = await previewBankCsv(csv, 'wise-fee.csv', initialState, 'wise-brl');
+    expect(preview.newTransactions).toHaveLength(1);
+    expect(preview.newTransactions[0].feeTreatment).toBe('INCLUDED_IN_REPORTED_AMOUNT');
+    expect(preview.newTransactions[0].netMovementCents).toBe(-10220);
+    expect(preview.newTransactions.some((item) => item.sourceComponent === 'fee')).toBe(false);
   });
 
 
