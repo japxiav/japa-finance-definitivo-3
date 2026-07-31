@@ -1030,8 +1030,50 @@ export function loadLocalState(userId: string, fallback: AppState): AppState | u
   }
 }
 
+function isQuotaExceededError(error: unknown): boolean {
+  return error instanceof DOMException && (
+    error.name === 'QuotaExceededError'
+    || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || error.code === 22
+    || error.code === 1014
+  );
+}
+
+function releaseRecoverableLocalSpace(userId: string) {
+  try {
+    // Checkpoints are only a convenience copy. The current state and the
+    // Supabase copy are more important, so old checkpoints are the first
+    // thing removed when Safari reaches its localStorage quota.
+    localStorage.removeItem(checkpointKey(userId));
+  } catch {
+    // Storage may be unavailable entirely (private mode / browser policy).
+  }
+}
+
+function writeLocalValueWithQuotaRecovery(userId: string, key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    if (!isQuotaExceededError(error)) throw error;
+  }
+
+  releaseRecoverableLocalSpace(userId);
+
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    if (!isQuotaExceededError(error)) throw error;
+    // Local cache is optional. Failing it must not take the React tree down;
+    // remote persistence can continue and the UI remains usable.
+    console.warn('Japa Finance: cache local cheio; estado mantido em memória e sincronização remota preservada.');
+    return false;
+  }
+}
+
 export function saveLocalState(userId: string, state: AppState) {
-  localStorage.setItem(cacheKey(userId), JSON.stringify(state));
+  writeLocalValueWithQuotaRecovery(userId, cacheKey(userId), JSON.stringify(state));
 }
 
 export function loadSyncMetadata(userId: string): SyncMetadata | undefined {
@@ -1048,17 +1090,30 @@ export function loadSyncMetadata(userId: string): SyncMetadata | undefined {
 }
 
 export function saveSyncMetadata(userId: string, metadata: SyncMetadata) {
-  localStorage.setItem(syncMetadataKey(userId), JSON.stringify(metadata));
+  writeLocalValueWithQuotaRecovery(userId, syncMetadataKey(userId), JSON.stringify(metadata));
 }
 
 export function createCheckpoint(userId: string, state: AppState, label: string) {
+  const key = checkpointKey(userId);
+  const newest = { label, createdAt: new Date().toISOString(), state };
   try {
-    const key = checkpointKey(userId);
     const existing = JSON.parse(localStorage.getItem(key) ?? '[]') as Array<{ label: string; createdAt: string; state: AppState }>;
-    existing.unshift({ label, createdAt: new Date().toISOString(), state });
-    localStorage.setItem(key, JSON.stringify(existing.slice(0, 8)));
-  } catch {
-    // Checkpoint local é proteção adicional; falha de quota não bloqueia o app.
+    const next = [newest, ...existing].slice(0, 2);
+
+    // localStorage costuma ter uma quota pequena no Safari. Checkpoints são
+    // cópias completas do estado, então recebem um orçamento próprio para não
+    // expulsarem o cache principal. Se o estado crescer demais, o checkpoint
+    // opcional é simplesmente dispensado.
+    const checkpointCharacterBudget = 750_000;
+    while (next.length > 0 && JSON.stringify(next).length > checkpointCharacterBudget) next.pop();
+    if (next.length === 0) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify(next));
+  } catch (error) {
+    if (!isQuotaExceededError(error)) return;
+    try { localStorage.removeItem(key); } catch { /* cache de recuperação opcional */ }
   }
 }
 
