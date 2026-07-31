@@ -63,6 +63,6 @@ export function PlannedEventModal({ accounts, currency, close, save }: {
     <label className="check-row"><input type="checkbox" checked={recurring} onChange={(event) => setRecurring(event.target.checked)} /><span>Repetir automaticamente</span></label>
     {recurring && <div className="form-grid"><label>Frequência<select value={frequency} onChange={(event) => setFrequency(event.target.value as RecurrenceFrequency)}><option value="weekly">Semanal</option><option value="monthly">Mensal</option><option value="yearly">Anual</option></select></label><label>A cada<input inputMode="numeric" value={interval} onChange={(event) => setInterval(event.target.value)} /></label></div>}
     {error && <div className="form-message error">{error}</div>}
-    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button>Adicionar</button></footer>
+    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="submit">Adicionar</button></footer>
   </form></div>;
 }

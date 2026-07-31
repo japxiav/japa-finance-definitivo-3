@@ -41,14 +41,14 @@ export function CategoryManagerModal({
   }
 
   return <div className="modal-bg"><section className="modal wide-modal category-manager">
-    <button className="close" onClick={close}><X size={17} /></button>
+    <button type="button" className="close" onClick={close}><X size={17} /></button>
     <span className="eyebrow">CATEGORIAS</span><h2>Organize do seu jeito</h2>
     <p>As categorias padrão continuam amplas. Crie uma específica somente quando ela realmente ajudar a entender seu dinheiro, e não para catalogar cada átomo comprado.</p>
 
     <form className="category-create" onSubmit={submit}>
       <label>Nova categoria<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Filha, Música, Viagem..." /></label>
       <label>Tipo<select value={type} onChange={(event) => setType(event.target.value as CategoryType)}><option value="expense">Despesa</option><option value="income">Receita</option><option value="both">Ambos</option></select></label>
-      <button>Adicionar</button>
+      <button type="submit">Adicionar</button>
     </form>
     {error && <div className="form-message error">{error}</div>}
 
@@ -66,14 +66,14 @@ export function CategoryManagerModal({
           </div>
           {canEdit && category.active && <div className="archive-controls">
             {count > 0 && <select aria-label={`Destino de ${category.name}`} value={destinations[category.id] ?? ''} onChange={(event) => setDestinations((current) => ({ ...current, [category.id]: event.target.value }))}><option value="">Mover antes de arquivar</option>{activeDestinations.filter((item) => item.id !== category.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
-            <button className="icon-button tiny" title="Arquivar" disabled={count > 0 && !destinations[category.id]} onClick={() => archive(category.id, destinations[category.id])}><Archive size={15} /></button>
+            <button type="button" className="icon-button tiny" title="Arquivar" disabled={count > 0 && !destinations[category.id]} onClick={() => archive(category.id, destinations[category.id])}><Archive size={15} /></button>
           </div>}
-          {canEdit && !category.active && <button className="secondary tiny" onClick={() => restore(category.id)}><RotateCcw size={15} /> Restaurar</button>}
+          {canEdit && !category.active && <button type="button" className="secondary tiny" onClick={() => restore(category.id)}><RotateCcw size={15} /> Restaurar</button>}
         </article>;
       })}
     </div>
 
-    {learnedRules.length > 0 && <section className="learned-rules"><h3>Comerciantes aprendidos</h3>{learnedRules.map((rule) => <article key={rule.id}><div><b>{rule.merchantLabel ?? rule.pattern}</b><small>{categories.find((item) => item.id === rule.categoryId)?.name ?? rule.categoryId}</small></div><button className="icon-button tiny" title="Esquecer regra" onClick={() => removeRule(rule.id)}><Trash2 size={15} /></button></article>)}</section>}
-    <footer><button onClick={close}>Concluir</button></footer>
+    {learnedRules.length > 0 && <section className="learned-rules"><h3>Comerciantes aprendidos</h3>{learnedRules.map((rule) => <article key={rule.id}><div><b>{rule.merchantLabel ?? rule.pattern}</b><small>{categories.find((item) => item.id === rule.categoryId)?.name ?? rule.categoryId}</small></div><button type="button" className="icon-button tiny" title="Esquecer regra" onClick={() => removeRule(rule.id)}><Trash2 size={15} /></button></article>)}</section>}
+    <footer><button type="button" onClick={close}>Concluir</button></footer>
   </section></div>;
 }

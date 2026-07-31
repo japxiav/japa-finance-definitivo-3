@@ -434,11 +434,11 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
       priority: topMerchant.share >= 0.4 ? 83 : 66,
       evidence: [
         { label: 'Total', value: formatMoney(topMerchant.amountCents, currency) },
-        { label: 'Compras', value: String(topMerchant.transactionCount) },
+        { label: 'Movimentações', value: String(topMerchant.transactionCount) },
       ],
       merchant: topMerchant.key,
       action: 'transactions',
-      actionLabel: `Ver ${label}`,
+      actionLabel: 'Ver movimentações relacionadas',
       period: current.range,
     }));
   }
@@ -483,7 +483,7 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
     items.push(candidate({
       id: `no-spend-streak:${current.range.start}:${current.longestNoSpendStreak}`,
       family: 'no-spend-streak',
-      title: 'Boa sequência sem despesas',
+      title: `${current.longestNoSpendStreak} dias sem gastos registrados`,
       message: `Você passou ${current.longestNoSpendStreak} dias seguidos sem registrar gastos variáveis.`,
       tone: 'positive',
       confidence: 'high',
@@ -500,7 +500,7 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
     items.push(candidate({
       id: `largest-expense:${current.largestExpense.transactionId}`,
       family: 'largest-expense',
-      title: 'Uma compra se destacou',
+      title: 'Uma saída se destacou',
       message: `${current.largestExpense.description} foi a maior despesa do período: ${formatMoney(current.largestExpense.amountCents, currency)}.`,
       tone: 'neutral',
       confidence: 'high',
@@ -522,7 +522,7 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
     items.push(candidate({
       id: `average-ticket:${current.range.start}`,
       family: 'average-ticket',
-      title: increased ? 'Suas compras ficaram maiores' : 'Suas compras ficaram menores',
+      title: increased ? 'Suas despesas ficaram maiores' : 'Suas despesas ficaram menores',
       message: `O valor médio por despesa ${increased ? 'subiu' : 'caiu'} ${pct(Math.abs(averageChange))}.`,
       tone: increased ? 'attention' : 'positive',
       confidence: confidenceFor(current.expenseTransactionCount + previous.expenseTransactionCount),
@@ -542,7 +542,7 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
       items.push(candidate({
         id: 'post-income-pattern',
         family: 'post-income-pattern',
-        title: 'O pagamento muda seu ritmo',
+        title: 'Seus gastos se concentram após entradas',
         message: `${pct(share)} dos seus gastos históricos aconteceram até três dias depois de uma entrada classificada como receita.`,
         tone: share >= 0.55 ? 'attention' : 'neutral',
         confidence: confidenceFor(postIncome.purchaseCount),
@@ -550,7 +550,7 @@ function addBehaviorInsights(state: AppState, bundle: AnalyticsBundle, items: Fi
         novelty: 88,
         evidence: [
           { label: 'Após receitas', value: formatMoney(postIncome.postIncomeAmountCents, currency) },
-          { label: 'Compras analisadas', value: String(postIncome.purchaseCount) },
+          { label: 'Movimentações analisadas', value: String(postIncome.purchaseCount) },
         ],
         period: current.range,
       }));

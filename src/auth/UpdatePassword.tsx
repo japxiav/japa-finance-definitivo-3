@@ -31,7 +31,7 @@ export function UpdatePassword({ onDone }: { onDone: () => void }) {
             <input type="password" minLength={8} required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
           </label>
           {error && <div className="form-message error">{error}</div>}
-          <button disabled={busy}><KeyRound size={18} />{busy ? 'Salvando...' : 'Salvar nova senha'}</button>
+          <button type="submit" disabled={busy}><KeyRound size={18} />{busy ? 'Salvando...' : 'Salvar nova senha'}</button>
         </form>
       </section>
     </main>

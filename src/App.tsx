@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import {
+  ArrowLeftRight,
+  BadgeCheck,
+  Building2,
   CalendarClock,
+  ChevronRight,
   ChartNoAxesCombined,
   CircleAlert,
   Cloud,
@@ -16,12 +20,16 @@ import {
   FileWarning,
   FileDown,
   Filter,
+  Gauge,
   History,
+  Layers3,
   Plus,
+  ReceiptText,
   RefreshCw,
   RotateCcw,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Tags,
   Upload,
@@ -37,11 +45,16 @@ import { createReconciliationSnapshotBatch } from './application/reconciliation'
 import { previewRevolutPdf } from './core/pdf';
 import { formatReportingDate, localCivilDate, localDateTimeToInstant } from './core/date';
 import { monthDateRange, monthKey, signedNetMovement } from './core/finance';
-import { buildAnalytics, latestReconciledBalance } from './analytics/metrics';
+import { buildAnalytics } from './analytics/metrics';
+import { buildCurrencyPosition, buildFreeMoneyPosition } from './analytics/accountPositions';
+import { buildCurrencyAnalytics } from './analytics/currencyAnalytics';
 import { buildPeriodComparison } from './analytics/comparison';
 import { generateInsights } from './insights/engine';
+import { buildImpactInsights, type ImpactInsight } from './insights/impactEngine';
 import type { FinancialInsight } from './insights/types';
 import { InsightCard } from './components/InsightCard';
+import { ImpactInsightCard } from './components/ImpactInsightCard';
+import { TransferDetailModal, type TransferDetailResult } from './components/TransferDetailModal';
 import { MerchantLearningModal } from './components/MerchantLearningModal';
 import { ReserveModal } from './components/ReserveModal';
 import { PlannedEventModal } from './components/PlannedEventModal';
@@ -52,6 +65,7 @@ import { createConfirmedBatch, getUndoImpact, restoreImport, undoImport } from '
 import { formatMoney, parseSignedMoneyToCents } from './core/money';
 import { normalizeMerchant } from './core/merchant';
 import { buildActivityTimeline } from './application/activityTimeline';
+import { confirmInternalTransferSuggestion, findInternalTransferSuggestions, rejectInternalTransferSuggestion, type InternalTransferSuggestion } from './application/internalTransfers';
 import { downloadTransactionsCsv, filterTransactions } from './application/transactionFilters';
 import {
   loadRemoteState,
@@ -77,6 +91,7 @@ import type {
   Category,
   CategoryType,
   ImportIssue,
+  Institution,
   ReviewGroup,
   ReviewReason,
   Transaction,
@@ -265,6 +280,7 @@ function FinanceApp({ session }: { session: Session }) {
   const [month, setMonth] = useState('all');
   const [currency, setCurrency] = useState('EUR');
   const [accountFilter, setAccountFilter] = useState('all');
+  const [institutionFilter, setInstitutionFilter] = useState<'all' | Institution>('all');
   const [importAccountId, setImportAccountId] = useState('revolut-eur');
   const [error, setError] = useState('');
   const [syncState, setSyncState] = useState<SyncState>('loading');
@@ -287,7 +303,9 @@ function FinanceApp({ session }: { session: Session }) {
   const [sourceFilter, setSourceFilter] = useState<'all' | Transaction['source']>('all');
   const [reviewOnly, setReviewOnly] = useState(false);
   const [bulkRuleOpen, setBulkRuleOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'discoveries' | 'assistant' | 'accounts' | 'review'>('home');
+  const [transferDetailTransaction, setTransferDetailTransaction] = useState<Transaction | null>(null);
+  const [discoveriesView, setDiscoveriesView] = useState<'now' | 'opportunity' | 'patterns'>('now');
+  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'accounts' | 'review'>('home');
   const [assistantQuestion, setAssistantQuestion] = useState('');
   const [assistantTargetAccountId, setAssistantTargetAccountId] = useState('');
   const [assistantAnswer, setAssistantAnswer] = useState<AssistantResult | null>(null);
@@ -501,12 +519,15 @@ function FinanceApp({ session }: { session: Session }) {
       account.id === accountFilter && account.currency === currency)) {
       setAccountFilter('all');
     }
+    if (institutionFilter !== 'all' && !active.some((account) => account.currency === currency && account.institution === institutionFilter)) {
+      setInstitutionFilter('all');
+    }
     const availableMonths = new Set(state.transactions
       .filter((transaction) => transaction.status !== 'voided' && transaction.status !== 'merged')
       .map((transaction) => monthKey(transaction.reportingDate)));
     if (month !== 'all' && !availableMonths.has(month)) setMonth('all');
     if (categoryFilter !== 'all' && categoryFilter !== 'uncategorized' && !state.categories.some((item) => item.id === categoryFilter && item.active)) setCategoryFilter('all');
-  }, [state, currency, importAccountId, assistantTargetAccountId, accountFilter, month, categoryFilter]);
+  }, [state, currency, importAccountId, assistantTargetAccountId, accountFilter, institutionFilter, month, categoryFilter]);
 
   if (sessionMismatch) return <main className="loading-screen"><RefreshCw className="spin" />Trocando de cofre...</main>;
   if (!state) return <main className="loading-screen"><RefreshCw className="spin" />Carregando dados...</main>;
@@ -537,7 +558,10 @@ function FinanceApp({ session }: { session: Session }) {
     currency,
     query,
     accountId: accountFilter,
+    institution: institutionFilter,
+    institutionByAccountId: new Map(financeState.accounts.map((account) => [account.id, account.institution])),
     categoryId: categoryFilter,
+    allocations: financeState.transactionAllocations,
     periodStart: dateStart || (month !== 'all' ? range?.start : undefined),
     periodEnd: dateEnd || (month !== 'all' ? range?.end : undefined),
     minAmount,
@@ -549,13 +573,43 @@ function FinanceApp({ session }: { session: Session }) {
   });
   const analytics = buildAnalytics(financeState, currency, range);
   const insightResult = generateInsights(financeState, currency, range, { limit: 30 });
-  const homeInsights = insightResult.insights.slice(0, 3);
-  const reconciledPosition = latestReconciledBalance(financeState, currency);
   const reservePolicy = financeState.reservePolicies.find((item) => item.currency === currency);
   const currencyAccounts = activeAccounts.filter((account) => account.currency === currency);
+  const currencyInstitutions = [...new Set(currencyAccounts.map((account) => account.institution))].sort();
   const homeTargetAccount = currencyAccounts.find((account) => account.id === assistantTargetAccountId)
     ?? (currencyAccounts.length === 1 ? currencyAccounts[0] : undefined);
   const today = localCivilDate();
+  const currencyPosition = buildCurrencyPosition(financeState, currency, today);
+  const freeMoneyPosition = buildFreeMoneyPosition(financeState, currencyPosition, today);
+  const currencyAnalytics = buildCurrencyAnalytics(financeState, currency);
+  const internalTransferSuggestions = findInternalTransferSuggestions(financeState, currency);
+  const impactInsights = buildImpactInsights({
+    state: financeState,
+    currency,
+    position: currencyPosition,
+    freeMoney: freeMoneyPosition,
+    analytics,
+    currencyAnalytics,
+    internalSuggestions: internalTransferSuggestions,
+    formatMoney: (amountCents) => formatMoney(amountCents, currency),
+  });
+  const nowImpactInsights = impactInsights.filter((insight) => insight.group === 'now');
+  const opportunityImpactInsights = impactInsights.filter((insight) => insight.group === 'opportunity');
+  const allCurrencyPositions = currencies.map((item) => buildCurrencyPosition(financeState, item, today));
+  const allCurrencyAnalytics = currencies.map((item) => buildCurrencyAnalytics(financeState, item));
+  const recurringAllocations = financeState.transactionAllocations.filter((allocation) => allocation.recurring
+    && financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency));
+  const currencyHistoryDates = financeState.transactions
+    .filter((transaction) => transaction.currency === currency && transaction.status === 'completed')
+    .map((transaction) => transaction.reportingDate)
+    .sort();
+  const currencyHistoryStart = currencyHistoryDates[0];
+  const currencyHistoryEnd = currencyHistoryDates.at(-1);
+  const unpairedConversionCount = financeState.transactions.filter((transaction) => transaction.currency === currency
+    && transaction.status === 'completed'
+    && transaction.technicalType === 'currency_conversion'
+    && transaction.sourceComponent !== 'fee'
+    && !transaction.transferGroupId).length;
   const homeLimit = homeTargetAccount
     ? financialDecisionFacade.calculateSpendingLimit({
         appState: financeState,
@@ -569,6 +623,8 @@ function FinanceApp({ session }: { session: Session }) {
     .filter((event) => event.active && event.currency === currency && event.dueDate >= today)
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const nextPlannedEvent = upcomingEvents[0];
+  const plannedOutflows = upcomingEvents.filter((event) => event.direction === 'outflow');
+  const plannedInflows = upcomingEvents.filter((event) => event.direction === 'inflow');
   const currencyAccountIds = new Set(financeState.accounts
     .filter((account) => account.currency === currency)
     .map((account) => account.id));
@@ -644,89 +700,121 @@ function FinanceApp({ session }: { session: Session }) {
     if (window.confirm(message)) setState(withRebuiltReviewGroups(undoImport(financeState, importId)));
   }
 
+  const categoryMutationLock = useRef(new Set<string>());
+
   function updateCategory(transaction: Transaction, rawCategoryId: string) {
-    const categoryId = rawCategoryId || undefined;
-    const category = categoryId
-      ? financeState.categories.find((item) => item.id === categoryId && item.active)
-      : undefined;
-    if (categoryId && (!category || !isCategoryCompatible(category, transaction))) {
-      setError('Categoria inválida para o tipo técnico desta movimentação.');
-      return;
-    }
-    createCheckpoint(userId, financeState, `Antes de classificar ${transaction.descriptionOriginal}`);
-    const next = applyCategoryDecision({
-      state: financeState,
-      transactionIds: [transaction.id],
-      categoryId,
-      kind: 'apply_transaction_category',
-      label: category ? `${transaction.descriptionOriginal} → ${category.name}` : `${transaction.descriptionOriginal} → sem categoria`,
-    });
-    setState(next);
-    const updatedTransaction = next.transactions.find((item) => item.id === transaction.id);
-    if (
-      category
-      && updatedTransaction
-      && transaction.categoryId !== categoryId
-      && transaction.source !== 'manual'
-      && categoryId !== 'income'
-      && transaction.merchantNormalized.trim()
-    ) {
-      setMerchantLearning({ transaction: updatedTransaction, category });
+    if (categoryMutationLock.current.has(transaction.id)) return;
+    categoryMutationLock.current.add(transaction.id);
+    try {
+      const categoryId = rawCategoryId || undefined;
+      const category = categoryId
+        ? financeState.categories.find((item) => item.id === categoryId && item.active)
+        : undefined;
+      if (categoryId && (!category || !isCategoryCompatible(category, transaction))) {
+        setError('Categoria inválida para o tipo técnico desta movimentação.');
+        return;
+      }
+      setError('');
+      createCheckpoint(userId, financeState, `Antes de classificar ${transaction.descriptionOriginal}`);
+      setState((current) => {
+        if (!current) return current;
+        try {
+          return applyCategoryDecision({
+            state: current,
+            transactionIds: [transaction.id],
+            categoryId,
+            kind: 'apply_transaction_category',
+            label: category ? `${transaction.descriptionOriginal} → ${category.name}` : `${transaction.descriptionOriginal} → sem categoria`,
+          });
+        } catch (caught) {
+          queueMicrotask(() => setError(`Não foi possível alterar a categoria: ${caught instanceof Error ? caught.message : 'erro inesperado'}. Seus dados anteriores foram preservados.`));
+          return current;
+        }
+      });
+      if (
+        category
+        && transaction.categoryId !== categoryId
+        && transaction.source !== 'manual'
+        && categoryId !== 'income'
+        && transaction.merchantNormalized.trim()
+      ) {
+        setMerchantLearning({ transaction: { ...transaction, categoryId, categorySource: 'manual', categoryReviewStatus: 'resolved' }, category });
+      }
+    } catch (caught) {
+      setError(`Não foi possível alterar a categoria: ${caught instanceof Error ? caught.message : 'erro inesperado'}. Seus dados anteriores foram preservados.`);
+    } finally {
+      queueMicrotask(() => categoryMutationLock.current.delete(transaction.id));
     }
   }
 
   function updateTechnicalType(transaction: Transaction, technicalType: TechnicalMovementType) {
-    if (!isTechnicalTypeDirectionCompatible(technicalType, transaction.direction)) {
-      setError(`O tipo ${technicalTypeLabel(technicalType)} é incompatível com uma ${transaction.direction === 'inflow' ? 'entrada' : 'saída'} bancária.`);
-      return;
+    if (categoryMutationLock.current.has(transaction.id)) return;
+    categoryMutationLock.current.add(transaction.id);
+    try {
+      if (!isTechnicalTypeDirectionCompatible(technicalType, transaction.direction)) {
+        setError(`O tipo ${technicalTypeLabel(technicalType)} é incompatível com uma ${transaction.direction === 'inflow' ? 'entrada' : 'saída'} bancária.`);
+        return;
+      }
+      setError('');
+      const editedAt = new Date().toISOString();
+      const kind = kindForTechnicalType(technicalType);
+      let reasons = withoutReason(transaction.reviewReasons, 'unknown_kind');
+      reasons = withoutReason(reasons, 'ambiguous_transfer');
+      if (technicalType === 'unknown') reasons = withReason(reasons, 'unknown_kind');
+      const analysisExcluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
+      const transferGroupId = analysisExcluded
+        ? (transaction.transferGroupId ?? `manual-confirmed:${transaction.id}`)
+        : undefined;
+      const currentCategory = transaction.categoryId
+        ? financeState.categories.find((category) => category.id === transaction.categoryId)
+        : undefined;
+      const keepCategory = currentCategory
+        ? isCategoryCompatible(currentCategory, { direction: transaction.direction, kind, technicalType })
+        : false;
+      const nextCategoryId = keepCategory ? transaction.categoryId : undefined;
+      const categoryWasCleared = Boolean(transaction.categoryId && !nextCategoryId);
+      const categoryReviewStatus = nextCategoryId
+        ? 'resolved' as const
+        : isCategoryReviewApplicable(technicalType)
+          ? 'pending' as const
+          : 'not_applicable' as const;
+      createCheckpoint(userId, financeState, `Antes de corrigir o tipo de ${transaction.descriptionOriginal}`);
+      setState((current) => {
+        if (!current) return current;
+        try {
+          return withRebuiltReviewGroups({
+            ...current,
+            transactions: current.transactions.map((item) => item.id === transaction.id ? {
+              ...item,
+              kind,
+              technicalType,
+              kindSource: 'manual',
+              transferGroupId,
+              analysisExcluded,
+              categoryId: nextCategoryId,
+              categorySource: nextCategoryId ? item.categorySource : 'none',
+              categoryReviewStatus,
+              needsReview: reasons.length > 0,
+              reviewReasons: reasons,
+              manualEditLog: [
+                ...item.manualEditLog,
+                { field: 'technicalType', oldValue: item.technicalType, newValue: technicalType, editedAt },
+                { field: 'kind', oldValue: item.kind, newValue: kind, editedAt },
+                ...(categoryWasCleared ? [{ field: 'categoryId', oldValue: item.categoryId, newValue: undefined, editedAt }] : []),
+              ],
+              updatedAt: editedAt,
+            } : item),
+          }, editedAt);
+        } catch (caught) {
+          queueMicrotask(() => setError(`Não foi possível alterar o tipo da movimentação: ${caught instanceof Error ? caught.message : 'erro inesperado'}. Seus dados anteriores foram preservados.`));
+          return current;
+        }
+      });
+    } catch (caught) {
+      setError(`Não foi possível alterar o tipo da movimentação: ${caught instanceof Error ? caught.message : 'erro inesperado'}.`);
+    } finally {
+      queueMicrotask(() => categoryMutationLock.current.delete(transaction.id));
     }
-    setError('');
-    const editedAt = new Date().toISOString();
-    const kind = kindForTechnicalType(technicalType);
-    let reasons = withoutReason(transaction.reviewReasons, 'unknown_kind');
-    reasons = withoutReason(reasons, 'ambiguous_transfer');
-    if (technicalType === 'unknown') reasons = withReason(reasons, 'unknown_kind');
-    const analysisExcluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
-    const transferGroupId = analysisExcluded
-      ? (transaction.transferGroupId ?? `manual-confirmed:${transaction.id}`)
-      : undefined;
-    const currentCategory = transaction.categoryId
-      ? financeState.categories.find((category) => category.id === transaction.categoryId)
-      : undefined;
-    const keepCategory = currentCategory
-      ? isCategoryCompatible(currentCategory, { direction: transaction.direction, kind, technicalType })
-      : false;
-    const nextCategoryId = keepCategory ? transaction.categoryId : undefined;
-    const categoryWasCleared = Boolean(transaction.categoryId && !nextCategoryId);
-    const categoryReviewStatus = nextCategoryId
-      ? 'resolved' as const
-      : isCategoryReviewApplicable(technicalType)
-        ? 'pending' as const
-        : 'not_applicable' as const;
-    createCheckpoint(userId, financeState, `Antes de corrigir o tipo de ${transaction.descriptionOriginal}`);
-    setState(withRebuiltReviewGroups({
-      ...financeState,
-      transactions: financeState.transactions.map((item) => item.id === transaction.id ? {
-        ...item,
-        kind,
-        technicalType,
-        kindSource: 'manual',
-        transferGroupId,
-        analysisExcluded,
-        categoryId: nextCategoryId,
-        categorySource: nextCategoryId ? item.categorySource : 'none',
-        categoryReviewStatus,
-        needsReview: reasons.length > 0,
-        reviewReasons: reasons,
-        manualEditLog: [
-          ...item.manualEditLog,
-          { field: 'technicalType', oldValue: item.technicalType, newValue: technicalType, editedAt },
-          { field: 'kind', oldValue: item.kind, newValue: kind, editedAt },
-          ...(categoryWasCleared ? [{ field: 'categoryId', oldValue: item.categoryId, newValue: undefined, editedAt }] : []),
-        ],
-        updatedAt: editedAt,
-      } : item),
-    }, editedAt));
   }
 
   function rememberMerchantRule() {
@@ -936,6 +1024,85 @@ function FinanceApp({ session }: { session: Session }) {
     }
   }
 
+  function openImpactAction(insight: ImpactInsight) {
+    if (insight.action === 'reconcile') return recordBalanceSnapshot();
+    if (insight.action === 'plan') return setActiveTab('planning');
+    if (insight.action === 'internal-transfers') return setActiveTab('review');
+    if (insight.action === 'accounts') return setActiveTab('accounts');
+    if (insight.action === 'transfer-details') {
+      setTechnicalTypeFilter('outgoing_transfer');
+      setDirectionFilter('outflow');
+      setActiveTab('transactions');
+      return;
+    }
+    if (insight.action === 'transactions') setActiveTab('transactions');
+  }
+
+  function confirmInternalSuggestion(suggestion: InternalTransferSuggestion) {
+    createCheckpoint(userId, financeState, `Antes de vincular transferência interna de ${formatMoney(suggestion.amountCents, suggestion.outflow.currency)}`);
+    setState(confirmInternalTransferSuggestion(financeState, suggestion));
+  }
+
+  function rejectInternalSuggestion(suggestion: InternalTransferSuggestion) {
+    createCheckpoint(userId, financeState, `Antes de rejeitar sugestão de transferência interna`);
+    setState(rejectInternalTransferSuggestion(financeState, suggestion));
+  }
+
+  function saveTransferDetail(result: TransferDetailResult) {
+    if (!transferDetailTransaction) return;
+    const transactionId = transferDetailTransaction.id;
+    const now = new Date().toISOString();
+    createCheckpoint(userId, financeState, `Antes de detalhar ${transferDetailTransaction.descriptionOriginal}`);
+    const transactions = financeState.transactions.map((transaction) => transaction.id === transactionId ? {
+      ...transaction,
+      categoryId: undefined,
+      categorySource: 'none' as const,
+      categoryReviewStatus: 'resolved' as const,
+      reviewReasons: transaction.reviewReasons.filter((reason) => reason !== 'uncategorized'),
+      needsReview: transaction.reviewReasons.some((reason) => reason !== 'uncategorized'),
+      manualEditLog: [...transaction.manualEditLog, {
+        field: 'transactionAllocations',
+        oldValue: financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transactionId).map((allocation) => allocation.id),
+        newValue: result.allocations.map((allocation) => allocation.id),
+        editedAt: now,
+      }],
+      updatedAt: now,
+    } : transaction);
+    const previousAllocations = financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transactionId);
+    const previousLinkedEventIds = new Set(previousAllocations.map((allocation) => allocation.plannedEventId).filter((id): id is string => Boolean(id)));
+    const nextAllocationByEventId = new Map<string, TransferDetailResult['allocations'][number]>();
+    for (const allocation of result.allocations) {
+      if (allocation.plannedEventId) nextAllocationByEventId.set(allocation.plannedEventId, allocation);
+    }
+    const plannedEvents = financeState.plannedEvents.map((event) => {
+      if (!previousLinkedEventIds.has(event.id)) return event;
+      const allocation = nextAllocationByEventId.get(event.id);
+      if (!allocation) return { ...event, active: false, updatedAt: now };
+      return {
+        ...event,
+        title: allocation.label,
+        amountCents: allocation.amountCents,
+        dueDate: allocation.nextDueDate ?? event.dueDate,
+        recurrence: allocation.recurring ? { frequency: allocation.recurrenceFrequency ?? 'monthly', interval: 1 } : event.recurrence,
+        active: Boolean(allocation.recurring),
+        updatedAt: now,
+      };
+    });
+    setState(withRebuiltReviewGroups({
+      ...financeState,
+      transactions,
+      transactionAllocations: [
+        ...result.allocations,
+        ...financeState.transactionAllocations.filter((allocation) => allocation.transactionId !== transactionId),
+      ],
+      plannedEvents: [
+        ...plannedEvents,
+        ...result.plannedEvents.filter((event) => !plannedEvents.some((current) => current.id === event.id)),
+      ],
+    }));
+    setTransferDetailTransaction(null);
+  }
+
   async function restoreBackup(file: File) {
     try {
       const replacement = await parseBackupFile(file, initialState);
@@ -979,6 +1146,7 @@ function FinanceApp({ session }: { session: Session }) {
   function clearTransactionFilters() {
     setQuery('');
     setAccountFilter('all');
+    setInstitutionFilter('all');
     setCategoryFilter('all');
     setMonth('all');
     setDateStart('');
@@ -1098,6 +1266,8 @@ function FinanceApp({ session }: { session: Session }) {
   }
 
   const categoryName = (categoryId?: string) => !categoryId || categoryId === 'uncategorized' ? 'Sem categoria' : (financeState.categories.find((category) => category.id === categoryId)?.name ?? categoryId);
+  const institutionName = (institution: Institution) => institution === 'revolut' ? 'Revolut' : institution === 'wise' ? 'Wise' : institution === 'cash' ? 'Dinheiro' : 'Outra';
+  const recurrenceName = (frequency?: 'weekly' | 'monthly' | 'yearly') => frequency === 'weekly' ? 'semanal' : frequency === 'yearly' ? 'anual' : 'mensal';
   const reviewReasonLabel = (reason: ReviewReason) => ({
     uncategorized: 'sem categoria',
     unknown_kind: 'tipo desconhecido',
@@ -1119,7 +1289,7 @@ function FinanceApp({ session }: { session: Session }) {
   const invalidMaximumAmount = Boolean(maxAmount.trim() && maximumFilterCents === undefined);
   const invalidAmountRange = minimumFilterCents !== undefined && maximumFilterCents !== undefined && minimumFilterCents > maximumFilterCents;
   const invalidFilters = invalidDateRange || invalidMinimumAmount || invalidMaximumAmount || invalidAmountRange;
-  const filtersActive = Boolean(query || accountFilter !== 'all' || categoryFilter !== 'all' || month !== 'all'
+  const filtersActive = Boolean(query || accountFilter !== 'all' || institutionFilter !== 'all' || categoryFilter !== 'all' || month !== 'all'
     || dateStart || dateEnd || minAmount || maxAmount || directionFilter !== 'all'
     || technicalTypeFilter !== 'all' || sourceFilter !== 'all' || reviewOnly);
   const latestActiveDecision = financeState.reviewDecisions.find((item) => !item.undoneAt);
@@ -1147,7 +1317,7 @@ function FinanceApp({ session }: { session: Session }) {
     {!reviewMode && <section className="transaction-tools">
       <section className="toolbar compact-toolbar">
         <label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar descrição, comerciante, nota ou ID" /></label>
-        <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)}><option value="all">Todas as contas</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select>
+        <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)}><option value="all">Todas as contas</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select><select value={institutionFilter} onChange={(event) => { setInstitutionFilter(event.target.value as 'all' | Institution); setAccountFilter('all'); }}><option value="all">Todas as instituições</option>{currencyInstitutions.map((institution) => <option key={institution} value={institution}>{institution === 'revolut' ? 'Revolut' : institution === 'wise' ? 'Wise' : institution}</option>)}</select>
         <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Todas as categorias</option><option value="uncategorized">Sem categoria</option>{financeState.categories.filter((category) => category.active).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
         <select value={month} onChange={(event) => { setMonth(event.target.value); setDateStart(''); setDateEnd(''); }}><option value="all">Todo o histórico</option>{months.map((item) => <option key={item} value={item}>{item}</option>)}</select>
       </section>
@@ -1168,22 +1338,24 @@ function FinanceApp({ session }: { session: Session }) {
         {invalidAmountRange && <p className="filter-warning">O valor mínimo precisa ser menor ou igual ao valor máximo.</p>}
       </details>
       <div className="transaction-actions">
-        <button className="secondary" onClick={() => setBulkRuleOpen(true)} disabled={filtered.length === 0 || invalidFilters}><WandSparkles size={16} /> Criar regra com prévia</button>
-        <button className="secondary" onClick={exportFilteredCsv} disabled={filtered.length === 0 || invalidFilters}><FileDown size={16} /> Exportar estes {filtered.length}</button>
-        {filtersActive && <button className="secondary filter-reset" onClick={clearTransactionFilters}><X size={15} /> Limpar filtros</button>}
+        <button type="button" className="secondary" onClick={() => setBulkRuleOpen(true)} disabled={filtered.length === 0 || invalidFilters}><WandSparkles size={16} /> Criar regra com prévia</button>
+        <button type="button" className="secondary" onClick={exportFilteredCsv} disabled={filtered.length === 0 || invalidFilters}><FileDown size={16} /> Exportar estes {filtered.length}</button>
+        {filtersActive && <button type="button" className="secondary filter-reset" onClick={clearTransactionFilters}><X size={15} /> Limpar filtros</button>}
       </div>
-      {latestActiveDecision?.kind === 'create_rule' && <div className="bulk-undo-banner"><span>{latestActiveDecision.label}</span><button className="link-button" onClick={undoReviewDecision}><RotateCcw size={14} /> Desfazer</button></div>}
+      {latestActiveDecision?.kind === 'create_rule' && <div className="bulk-undo-banner"><span>{latestActiveDecision.label}</span><button type="button" className="link-button" onClick={undoReviewDecision}><RotateCcw size={14} /> Desfazer</button></div>}
     </section>}
     {items.length === 0 ? <div className="empty"><WalletCards size={32} /><p>{reviewMode ? 'Nenhuma movimentação precisa de revisão.' : filtersActive ? 'Nenhuma movimentação corresponde aos filtros atuais.' : 'Importe um extrato ou crie uma movimentação manual.'}</p></div> : <div className="tx-list">{items.map((transaction) => {
       const categoryOptions = financeState.categories.filter((category) => isCategoryCompatible(category, transaction));
       const technicalOptions = technicalTypesForDirection(transaction.direction);
+      const allocations = financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transaction.id);
+      const allocationSummary = allocations.length ? `${allocations.length} ${allocations.length === 1 ? 'item detalhado' : 'itens detalhados'}${allocations.some((allocation) => allocation.relatedPerson) ? ` · ${[...new Set(allocations.map((allocation) => allocation.relatedPerson).filter(Boolean))].join(', ')}` : ''}` : '';
       const reverted = transaction.status === 'reverted';
       const displayedMovement = reverted
         ? (transaction.reportedAmountCents ?? (transaction.direction === 'inflow' ? transaction.amountCents : -transaction.amountCents))
         : signedNetMovement(transaction);
       return <article className={`tx ${transaction.needsReview ? 'needs-review' : ''} ${reverted ? 'reverted' : ''}`} key={transaction.id}>
-        <div className="tx-main"><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : categoryName(transaction.categoryId)}</small>{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</div>
-        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || !isCategoryReviewApplicable(transaction.technicalType)}><option value="">Sem categoria</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></div>
+        <div className="tx-main"><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : allocations.length ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small>{allocationSummary && <span className="allocation-summary">{allocationSummary}</span>}{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</div>
+        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || allocations.length > 0 || !isCategoryReviewApplicable(transaction.technicalType)}><option value="">{allocations.length ? 'Usa o detalhamento' : 'Sem categoria'}</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>{transaction.kind === 'transfer' && !transaction.analysisExcluded && !reverted && <button type="button" className="secondary tx-detail-button" onClick={() => setTransferDetailTransaction(transaction)}><ReceiptText size={14} /> {allocations.length ? 'Editar detalhes' : 'Detalhar transferência'}</button>}</div>
         <strong className={`${displayedMovement > 0 ? 'positive' : ''} ${reverted ? 'reverted-amount' : ''}`}>{displayedMovement < 0 ? '-' : '+'}{formatMoney(Math.abs(displayedMovement), transaction.currency)}{reverted && <small>revertida</small>}</strong>
       </article>;
     })}</div>}
@@ -1199,120 +1371,178 @@ function FinanceApp({ session }: { session: Session }) {
     ? { label: 'ANÁLISE DO PERÍODO PROVISÓRIA', title: 'Há dados deste período para revisar', tone: 'attention' }
     : criticalPendingCount > 0
       ? { label: 'REVISÃO PENDENTE', title: 'Há itens fora deste período para revisar', tone: 'attention' }
-      : !reconciledPosition
-        ? { label: 'SALDO AINDA NÃO RECONCILIADO', title: 'Falta confirmar a posição atual', tone: 'neutral' }
-        : homeLimit?.status === 'unsafe'
-          ? { label: 'ATENÇÃO', title: 'Sua margem está apertada', tone: 'warning' }
-          : { label: 'SITUAÇÃO ATUAL', title: 'Você está dentro do planejado', tone: 'positive' };
+      : currencyPosition.confidence === 'missing'
+        ? { label: 'SALDO AINDA NÃO CONFIRMADO', title: 'Falta informar a posição das contas', tone: 'neutral' }
+        : currencyPosition.confidence === 'stale'
+          ? { label: 'SALDO POSSIVELMENTE DESATUALIZADO', title: 'Vale confirmar a posição atual', tone: 'attention' }
+          : freeMoneyPosition.status === 'ready' && (freeMoneyPosition.freeCents ?? 0) < 0
+            ? { label: 'ATENÇÃO', title: 'Compromissos acima do dinheiro livre', tone: 'warning' }
+            : { label: 'SITUAÇÃO ATUAL', title: 'Seu presente financeiro está organizado', tone: 'positive' };
   const recentTransactions = visibleTransactions
     .filter((transaction) => transaction.status === 'completed'
       && transaction.currency === currency
       && transaction.reportingDate >= analytics.current.range.start
       && transaction.reportingDate <= analytics.current.range.end)
     .slice(0, 5);
+  const todayTransactions = visibleTransactions.filter((transaction) => transaction.status === 'completed' && transaction.currency === currency && transaction.reportingDate === today);
+  const todayInflowCents = todayTransactions.filter((transaction) => signedNetMovement(transaction) > 0).reduce((sum, transaction) => sum + signedNetMovement(transaction), 0);
+  const todayOutflowCents = todayTransactions.filter((transaction) => signedNetMovement(transaction) < 0).reduce((sum, transaction) => sum + Math.abs(signedNetMovement(transaction)), 0);
+  const balanceConfidenceLabel = currencyPosition.confidence === 'confirmed' ? 'Confirmado'
+    : currencyPosition.confidence === 'estimated' ? 'Estimado após a última confirmação'
+      : currencyPosition.confidence === 'stale' ? 'Possivelmente desatualizado' : 'Precisa confirmar';
+  const balanceConfidenceIcon = currencyPosition.confidence === 'confirmed' ? <BadgeCheck size={15} />
+    : currencyPosition.confidence === 'missing' ? <CircleAlert size={15} /> : <Gauge size={15} />;
+  const displayedCurrentBalance = currencyPosition.currentBalanceCents !== undefined
+    ? formatMoney(currencyPosition.currentBalanceCents, currency)
+    : 'Ainda não informado';
+  const topCategoryAmount = categoryRows.reduce((sum, item) => sum + item.amountCents, 0);
+  const otherCategoryAmount = Math.max(0, analytics.current.summary.expenseCents - topCategoryAmount);
+  const primaryImpactInsight = nowImpactInsights[0] ?? opportunityImpactInsights[0];
 
   return (
     <main className="app-shell">
-      <header className="app-topbar"><div className="mini-brand"><span>JF</span><b>Japa Finance</b></div><div className="topbar-actions"><select aria-label="Moeda" value={currency} onChange={(event) => { setCurrency(event.target.value); setAccountFilter('all'); setCategoryFilter('all'); }}>{currencies.map((item) => <option key={item}>{item}</option>)}</select><button className="avatar-button" onClick={() => supabase?.auth.signOut()} title="Sair">D</button></div></header>
-      {error && <section className="error-banner"><FileWarning size={18} /><span>{error}</span><button onClick={() => setError('')}><X size={16} /></button></section>}
+      <header className="app-topbar"><div className="mini-brand"><span>JF</span><b>Japa Finance</b></div><div className="topbar-actions"><select aria-label="Moeda" value={currency} onChange={(event) => { setCurrency(event.target.value); setAccountFilter('all'); setInstitutionFilter('all'); setCategoryFilter('all'); }}>{currencies.map((item) => <option key={item}>{item}</option>)}</select><button type="button" className="avatar-button" onClick={() => supabase?.auth.signOut()} title="Sair">D</button></div></header>
+      {error && <section className="error-banner"><FileWarning size={18} /><span>{error}</span><button type="button" onClick={() => setError('')}><X size={16} /></button></section>}
 
       {activeTab === 'home' && <section className="home-page-v2">
-        <section className="home-hero decision-hero"><span className="eyebrow">{month === 'all' ? 'AGORA' : month}</span><h1>Como está seu<br />dinheiro hoje?</h1><p>Primeiro a decisão. Depois os números, porque gráficos sem contexto são só decoração cara.</p></section>
+        <section className="home-hero decision-hero compact-hero"><span className="eyebrow">AGORA · {currency}</span><h1>Seu dinheiro,<br />sem adivinhação.</h1><p>Saldo, compromissos e fluxo separados. Parece básico porque deveria ser. Bancos levaram décadas para colaborar.</p></section>
 
         <section className={`financial-status ${homeStatus.tone}`}>
           <div className="status-orb"><Sparkles size={22} /></div>
-          <div><small>{homeStatus.label}</small><h2>{homeStatus.title}</h2><p>{periodCriticalPendingCount > 0 ? `${periodCriticalPendingCount} ${periodCriticalPendingCount === 1 ? 'item deste período precisa' : 'itens deste período precisam'} da sua ajuda.` : criticalPendingCount > 0 ? `${criticalPendingCount} ${criticalPendingCount === 1 ? 'item permanece' : 'itens permanecem'} pendente fora do intervalo exibido; o fluxo atual não depende deles.` : reconciledPosition ? `Posição reconciliada em ${new Date(reconciledPosition.logicalAsOf).toLocaleString('pt-IE')}.${pendingReviewGroupCount > 0 ? ` ${pendingReviewGroupCount} ${pendingReviewGroupCount === 1 ? 'grupo opcional pode' : 'grupos opcionais podem'} melhorar categorias e insights.` : ''}` : 'Atualize os saldos das contas para liberar limites e previsões confiáveis.'}</p></div>
-          {criticalPendingCount > 0 ? <button className="link-button" onClick={() => setActiveTab('review')}>Revisar</button> : !reconciledPosition ? <button className="link-button" onClick={recordBalanceSnapshot}>Atualizar saldos</button> : pendingReviewGroupCount > 0 ? <button className="link-button" onClick={() => setActiveTab('review')}>Melhorar categorias</button> : null}
+          <div><small>{homeStatus.label}</small><h2>{homeStatus.title}</h2><p>{periodCriticalPendingCount > 0 ? `${periodCriticalPendingCount} ${periodCriticalPendingCount === 1 ? 'item deste período precisa' : 'itens deste período precisam'} da sua ajuda.` : criticalPendingCount > 0 ? `${criticalPendingCount} ${criticalPendingCount === 1 ? 'item permanece' : 'itens permanecem'} pendente fora do intervalo exibido.` : currencyPosition.confidence === 'missing' ? 'Confirme os saldos por conta para liberar dinheiro livre e projeções confiáveis.' : `${balanceConfidenceLabel}.${pendingReviewGroupCount > 0 ? ` ${pendingReviewGroupCount} grupos opcionais podem melhorar as categorias.` : ''}`}</p></div>
+          {criticalPendingCount > 0 ? <button type="button" className="link-button" onClick={() => setActiveTab('review')}>Revisar</button> : currencyPosition.confidence === 'missing' || currencyPosition.confidence === 'stale' ? <button type="button" className="link-button" onClick={recordBalanceSnapshot}>Confirmar saldo</button> : null}
         </section>
 
-        <section className="home-grid-v2">
-          <article className="position-card">
-            <small>SALDO RECONCILIADO</small>
-            <strong>{reconciledPosition ? formatMoney(reconciledPosition.balanceCents, currency) : 'Ainda não informado'}</strong>
-            <span><Cloud size={14} /> {syncLabel}</span>
-          </article>
-          <article className={`safe-limit-card ${homeLimit?.status ?? 'incomplete'}`}>
-            <div><small>ATÉ A PRÓXIMA RECEITA</small><WalletCards size={20} /></div>
-            {currencyAccounts.length > 1 && <select aria-label="Conta usada no limite seguro" value={homeTargetAccount?.id ?? ''} onChange={(event) => { setAssistantTargetAccountId(event.target.value); setAssistantAnswer(null); }}><option value="">Escolha uma conta</option>{currencyAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select>}
-            <strong>{homeLimit?.amountCents !== undefined ? formatMoney(Math.max(0, homeLimit.amountCents), currency) : 'Precisa de dados'}</strong>
-            <p>{homeLimit?.status === 'safe' ? 'Valor projetado acima da reserva mínima.' : homeLimit?.status === 'unsafe' ? 'Não existe margem segura na projeção atual.' : homeLimit?.answer ?? 'Selecione uma conta e reconcilie os saldos.'}</p>
-            <button className="link-button" onClick={() => { setAssistantQuestion('Quanto posso gastar até o pagamento?'); setActiveTab('assistant'); }}>Ver cálculo</button>
-          </article>
+        <section className="current-balance-card">
+          <header><div><small>SALDO ATUAL · {currency}</small><strong>{displayedCurrentBalance}</strong></div><span className={`balance-confidence ${currencyPosition.confidence}`}>{balanceConfidenceIcon}{balanceConfidenceLabel}</span></header>
+          <div className="account-position-list">{currencyPosition.positions.map((position) => <article key={position.account.id}><div><Building2 size={16} /><span><b>{position.account.name}</b><small>{position.account.institution === 'revolut' ? 'Revolut' : position.account.institution === 'wise' ? 'Wise' : position.account.institution}</small></span></div><strong>{position.currentBalanceCents !== undefined ? formatMoney(position.currentBalanceCents, currency) : 'não informado'}</strong></article>)}</div>
+          <footer><span><Cloud size={14} /> {syncLabel}</span><button type="button" className="link-button" onClick={recordBalanceSnapshot}>Atualizar saldos</button></footer>
+          {currencyPosition.bridge && <details className="balance-bridge"><summary>Entenda como o saldo chegou aqui</summary><div><span><small>Saldo confirmado</small><b>{formatMoney(currencyPosition.bridge.openingBalanceCents, currency)}</b></span><span><small>Fluxo externo depois disso</small><b className={currencyPosition.bridge.externalFlowCents >= 0 ? 'positive' : 'negative'}>{formatMoney(currencyPosition.bridge.externalFlowCents, currency)}</b></span><span><small>Internas e conversões</small><b>{formatMoney(currencyPosition.bridge.internalMovementCents, currency)}</b></span><span><small>Taxas bancárias</small><b className="negative">{formatMoney(currencyPosition.bridge.feeCents, currency)}</b></span><span><small>Ajustes</small><b>{formatMoney(currencyPosition.bridge.adjustmentCents, currency)}</b></span><span className="bridge-total"><small>Saldo calculado agora</small><b>{formatMoney(currencyPosition.bridge.closingBalanceCents, currency)}</b></span></div><p>Base confirmada em {new Date(currencyPosition.bridge.logicalAsOf).toLocaleString('pt-BR')}. Movimentos posteriores atualizam o valor como estimativa até a próxima reconciliação.</p></details>}
         </section>
 
-        <section className="panel flow-panel">
-          <div className="panel-title"><div><small>FLUXO DO PERÍODO · {analysisPeriodLabel}</small><h2>Resultado do fluxo{periodCriticalPendingCount > 0 ? ' provisório' : ''}</h2></div><ChartNoAxesCombined size={22} /></div>
-          <div className="flow-breakdown"><article><small>Entradas externas</small><b className="positive">{formatMoney(analytics.current.summary.incomeCents, currency)}</b></article><article><small>Saídas externas líquidas</small><b>{formatMoney(analytics.current.summary.netExpenseCents, currency)}</b></article><article><small>Resultado do fluxo</small><b className={analytics.current.summary.netCashflowCents >= 0 ? 'positive' : ''}>{formatMoney(analytics.current.summary.netCashflowCents, currency)}</b></article></div>
-          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Este resultado cobre {analysisPeriodLabel}. Transferências internas e conversões ficam fora do fluxo; as comissões bancárias entram como despesas separadas. Transferências externas entram conforme a direção. Isso não é o saldo da conta: saldo é uma posição, fluxo é a soma dos movimentos do período.</p></details>
+        <section className="home-grid-v2 alpha5-home-grid">
+          <article className={`free-money-card ${freeMoneyPosition.status === 'ready' && (freeMoneyPosition.freeCents ?? 0) < 0 ? 'unsafe' : ''}`}>
+            <div><small>DINHEIRO REALMENTE LIVRE</small><ShieldCheck size={20} /></div>
+            <strong>{freeMoneyPosition.freeCents !== undefined ? formatMoney(freeMoneyPosition.freeCents, currency) : 'Precisa de saldo'}</strong>
+            <p>Saldo menos {formatMoney(freeMoneyPosition.commitmentsCents, currency)} em compromissos e {formatMoney(freeMoneyPosition.reserveCents, currency)} de reserva.</p>
+            <button type="button" className="link-button" onClick={() => setActiveTab('planning')}>Ver planejamento</button>
+          </article>
+          <article className="today-card">
+            <div><small>HOJE</small><CalendarClock size={20} /></div>
+            <strong>{formatMoney(todayInflowCents - todayOutflowCents, currency)}</strong>
+            <p><span className="positive">Entrou {formatMoney(todayInflowCents, currency)}</span><span>Saiu {formatMoney(todayOutflowCents, currency)}</span></p>
+            <button type="button" className="link-button" onClick={() => { setDateStart(today); setDateEnd(today); setMonth('all'); setActiveTab('transactions'); }}>Ver movimentos de hoje</button>
+          </article>
         </section>
 
         {nextPlannedEvent && <section className="next-event-card"><div className="event-icon"><CalendarClock size={21} /></div><div><small>PRÓXIMO COMPROMISSO</small><h3>{nextPlannedEvent.title}</h3><p>{nextEventDays === 0 ? 'Hoje' : nextEventDays === 1 ? 'Amanhã' : `Em ${nextEventDays} dias`} · {nextPlannedEvent.direction === 'outflow' ? 'saída' : 'entrada'}</p></div><strong>{nextPlannedEvent.direction === 'outflow' ? '-' : '+'}{formatMoney(nextPlannedEvent.amountCents, currency)}</strong></section>}
 
-        <section className="home-insights">
-          <div className="section-heading"><div><span className="eyebrow">DESCOBERTAS</span><h2>O que merece atenção</h2></div><button className="link-button" onClick={() => setActiveTab('discoveries')}>Ver todas</button></div>
-          <div className="insight-stack">{homeInsights.map((insight) => <InsightCard key={insight.key} insight={insight} compact onAction={openInsightAction} />)}</div>
+        <section className="panel flow-panel">
+          <div className="panel-title"><div><small>FLUXO DO PERÍODO · {analysisPeriodLabel}</small><h2>Resultado do fluxo{periodCriticalPendingCount > 0 ? ' provisório' : ''}</h2></div><ChartNoAxesCombined size={22} /></div>
+          <div className="flow-breakdown"><article><small>Entradas externas</small><b className="positive">{formatMoney(analytics.current.summary.incomeCents, currency)}</b></article><article><small>Saídas externas líquidas</small><b>{formatMoney(analytics.current.summary.netExpenseCents, currency)}</b></article><article><small>Resultado do fluxo</small><b className={analytics.current.summary.netCashflowCents >= 0 ? 'positive' : 'negative'}>{formatMoney(analytics.current.summary.netCashflowCents, currency)}</b></article></div>
+          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Transferências internas e conversões ficam fora do fluxo. Taxas bancárias entram como despesas separadas. Saldo é posição; fluxo é movimento.</p></details>
         </section>
 
-        <section className="panel home-section"><div className="panel-title"><div><small>GASTOS POR CATEGORIA</small><h2>Para onde foi seu dinheiro?</h2></div><button className="link-button" onClick={() => setActiveTab('transactions')}>Explorar</button></div>{categoryRows.length ? categoryRows.map((item) => { const max = categoryRows[0]?.amountCents ?? 1; return <button className="cat cat-button" key={item.key} onClick={() => { setCategoryFilter(item.key); setActiveTab('transactions'); }}><div><span>{categoryName(item.key)}</span><b>{formatMoney(item.amountCents, currency)}</b></div><i><em style={{ width: `${Math.max(3, item.amountCents / max * 100)}%` }} /></i><small>{Math.round(item.share * 100)}% · {item.transactionCount} movimentos</small></button>; }) : <p className="muted">Ainda não há despesas classificadas neste período.</p>}</section>
+        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <button type="button" className="recent-row" key={transaction.id} onClick={() => transaction.kind === 'transfer' && !transaction.analysisExcluded ? setTransferDetailTransaction(transaction) : setActiveTab('transactions')}><div><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {financeState.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id) ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : 'negative'}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></button>)}</div></section>
 
-        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <article key={transaction.id}><div><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : ''}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></article>)}</div></section>
+        {primaryImpactInsight && <section className="home-insights"><div className="section-heading"><div><span className="eyebrow">PRIORIDADE</span><h2>O que pode mudar uma decisão</h2></div><button type="button" className="link-button" onClick={() => { setDiscoveriesView(primaryImpactInsight.group); setActiveTab('discoveries'); }}>Ver todas</button></div><ImpactInsightCard insight={primaryImpactInsight} compact onAction={openImpactAction} /></section>}
+
+        <section className="panel home-section"><div className="panel-title"><div><small>GASTOS POR FINALIDADE</small><h2>Para onde foi seu dinheiro?</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Explorar</button></div>{categoryRows.length ? <>{categoryRows.map((item) => { const max = categoryRows[0]?.amountCents ?? 1; return <button type="button" className="cat cat-button" key={item.key} onClick={() => { setCategoryFilter(item.key); setActiveTab('transactions'); }}><div><span>{categoryName(item.key)}</span><b>{formatMoney(item.amountCents, currency)}</b></div><i><em style={{ width: `${Math.max(3, item.amountCents / max * 100)}%` }} /></i><small>{Math.round(item.share * 100)}% · {item.transactionCount} movimentos/itens</small></button>; })}{otherCategoryAmount > 0 && <div className="other-categories"><span>Outras categorias</span><b>{formatMoney(otherCategoryAmount, currency)} · {Math.round(otherCategoryAmount / Math.max(1, analytics.current.summary.expenseCents) * 100)}%</b></div>}</> : <p className="muted">Ainda não há despesas classificadas neste período.</p>}</section>
       </section>}
 
       {activeTab === 'transactions' && renderTransactions()}
 
-      {activeTab === 'discoveries' && <section className="discoveries-page">
-        <span className="eyebrow">DESCOBERTAS</span>
-        <h1>Seu dinheiro<br />devolvendo contexto.</h1>
-        <p>O motor encontrou {insightResult.generatedCount} análises candidatas e selecionou {insightResult.eligibleCount} que passaram pelos critérios de relevância, confiança e repetição.</p>
-        <div className="discoveries-summary"><article><Sparkles size={21} /><div><b>{insightResult.insights.length}</b><small>visíveis agora</small></div></article><article><ChartNoAxesCombined size={21} /><div><b>{analytics.current.expenseTransactionCount}</b><small>despesas analisadas</small></div></article><article><CalendarClock size={21} /><div><b>{analytics.current.observedDays}</b><small>dias observados</small></div></article></div>
+      {activeTab === 'planning' && <section className="planning-page">
+        <span className="eyebrow">PLANEJAR · {currency}</span>
+        <h1>O futuro sem<br />fantasia contábil.</h1>
+        <p>O saldo bruto não é dinheiro livre. Esta tela separa reserva, compromissos e próxima entrada antes que o otimismo faça compras sozinho.</p>
 
-        <section className="panel comparison-panel">
-          <div className="panel-title"><div><small>COMPARAÇÃO EQUIVALENTE</small><h2>Período atual x anterior</h2></div><ChartNoAxesCombined size={21} /></div>
-          <p className="comparison-range">{formatReportingDate(comparison.currentRange.start)} a {formatReportingDate(comparison.currentRange.end)} <span>contra</span> {formatReportingDate(comparison.previousRange.start)} a {formatReportingDate(comparison.previousRange.end)}</p>
-          {comparison.comparable && <div className="comparison-metrics">{comparison.metrics.map((metric) => {
-            const improved = metric.favorableWhenLower ? metric.differenceCents < 0 : metric.differenceCents > 0;
-            const comparisonTone = metric.differenceCents === 0 ? 'neutral' : improved ? 'positive' : 'negative';
-            const differencePrefix = metric.differenceCents === 0 ? '' : metric.differenceCents > 0 ? '+' : '-';
-            return <article key={metric.label}><small>{metric.label}</small><strong>{formatMoney(metric.currentCents, currency)}</strong><span className={comparisonTone}>{differencePrefix}{formatMoney(Math.abs(metric.differenceCents), currency)}{metric.percentChange !== undefined ? ` · ${Math.round(metric.percentChange * 100)}%` : ''}</span><em>anterior: {formatMoney(metric.previousCents, currency)}</em></article>;
-          })}</div>}
-          <div className="comparison-explanations">{comparison.explanations.map((explanation) => <article className={explanation.tone} key={explanation.id}><b>{explanation.title}</b><p>{explanation.body}</p></article>)}</div>
-          {comparison.comparable && <small className="comparison-note">Os dois lados usam a mesma quantidade de dias observados.</small>}
+        <section className="planning-summary">
+          <article className={freeMoneyPosition.freeCents !== undefined && freeMoneyPosition.freeCents < 0 ? 'unsafe' : ''}><small>DINHEIRO LIVRE</small><strong>{freeMoneyPosition.freeCents !== undefined ? formatMoney(freeMoneyPosition.freeCents, currency) : 'Precisa de saldo'}</strong><span>Depois de compromissos e reserva</span></article>
+          <article><small>PRÓXIMA ENTRADA</small><strong>{freeMoneyPosition.nextIncomeDate ? formatReportingDate(freeMoneyPosition.nextIncomeDate) : 'Não cadastrada'}</strong><span>{plannedInflows[0] ? `${plannedInflows[0].title} · ${formatMoney(plannedInflows[0].amountCents, currency)}` : 'Cadastre uma receita futura'}</span></article>
+          <article><small>LIMITE DIÁRIO</small><strong>{freeMoneyPosition.safeDailyCents !== undefined ? formatMoney(freeMoneyPosition.safeDailyCents, currency) : 'Indisponível'}</strong><span>{freeMoneyPosition.daysToNextIncome ? `por ${freeMoneyPosition.daysToNextIncome} dias` : 'depende da próxima receita'}</span></article>
         </section>
 
-        <div className="insight-stack discoveries-stack">{insightResult.insights.map((insight) => <InsightCard key={insight.key} insight={insight} onAction={openInsightAction} onUseful={(item) => updateInsightFeedback(item, { useful: true, lastShownAt: new Date().toISOString() })} onDismiss={(item) => updateInsightFeedback(item, { dismissedAt: new Date().toISOString() })} />)}</div>
+        <div className="planning-actions"><button type="button" onClick={() => setPlannedEventOpen(true)}><Plus size={17} /> Adicionar compromisso</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><ShieldCheck size={17} /> Definir reserva</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={17} /> Perguntar aos números</button></div>
+
+        <section className="panel planning-breakdown"><div className="panel-title"><div><small>ATÉ A PRÓXIMA RECEITA</small><h2>O que já está comprometido</h2></div><CalendarClock size={20} /></div><div className="planning-breakdown-grid"><span><small>Saldo atual</small><b>{currencyPosition.currentBalanceCents !== undefined ? formatMoney(currencyPosition.currentBalanceCents, currency) : 'não confirmado'}</b></span><span><small>Compromissos</small><b className="negative">-{formatMoney(freeMoneyPosition.commitmentsCents, currency)}</b></span><span><small>Reserva protegida</small><b>-{formatMoney(freeMoneyPosition.reserveCents, currency)}</b></span><span className="planning-total"><small>Realmente livre</small><b>{freeMoneyPosition.freeCents !== undefined ? formatMoney(freeMoneyPosition.freeCents, currency) : 'incompleto'}</b></span></div></section>
+
+        <section className="panel commitments-panel"><div className="panel-title"><div><small>AGENDA FINANCEIRA</small><h2>Próximos eventos</h2></div><span>{upcomingEvents.length}</span></div>{upcomingEvents.length ? <div className="commitment-list">{upcomingEvents.slice(0, 12).map((event) => <article key={event.id}><div className={`commitment-direction ${event.direction}`}><ChevronRight size={16} /></div><div><b>{event.title}</b><small>{formatReportingDate(event.dueDate)} · {event.recurrence ? recurrenceName(event.recurrence.frequency) : 'pontual'}{event.accountId ? ` · ${accountName(event.accountId)}` : ' · conta pendente'}</small></div><strong className={event.direction === 'inflow' ? 'positive' : 'negative'}>{event.direction === 'inflow' ? '+' : '-'}{formatMoney(event.amountCents, currency)}</strong></article>)}</div> : <div className="empty compact-empty"><CalendarClock size={28} /><p>Nenhuma receita ou compromisso futuro cadastrado.</p></div>}</section>
+
+        <section className="panel recurring-panel"><div className="panel-title"><div><small>RECORRÊNCIAS EM TRANSFERÊNCIAS</small><h2>Assinaturas e divisões</h2></div><ReceiptText size={20} /></div>{recurringAllocations.length ? <div className="recurring-allocation-list">{recurringAllocations.map((allocation) => <article key={allocation.id}><div><b>{allocation.label}</b><small>{allocation.relatedPerson ? `${allocation.relatedPerson} · ` : ''}${recurrenceName(allocation.recurrenceFrequency)}{allocation.nextDueDate ? ` · próxima ${formatReportingDate(allocation.nextDueDate)}` : ''}</small></div><strong>{formatMoney(allocation.amountCents, currency)}</strong></article>)}</div> : <p className="muted">Ao detalhar uma transferência, marque itens recorrentes para que assinaturas compartilhadas entrem no planejamento.</p>}</section>
+
+        {homeLimit && <section className="panel decision-limit-card"><div className="panel-title"><div><small>LIMITE DETERMINÍSTICO</small><h2>Margem da conta selecionada</h2></div><Gauge size={20} /></div><strong>{homeLimit.amountCents !== undefined ? formatMoney(homeLimit.amountCents, currency) : 'Precisa completar os dados'}</strong><p>{homeLimit.answer}</p></section>}
       </section>}
 
-      {activeTab === 'assistant' && <section className="assistant-page"><span className="eyebrow">ASSISTENTE DETERMINÍSTICO</span><h1>Converse com<br />seus números.</h1><p>Ele não inventa saldo nem usa IA para decidir. O motor responde a partir da reconciliação, do forecast e dos compromissos cadastrados.</p><label className="assistant-account-selector">Conta-alvo<select aria-label="Conta-alvo do assistente" value={assistantTargetAccountId} onChange={(event) => setAssistantTargetAccountId(event.target.value)}><option value="">Selecione uma conta</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><div className="prompt-grid">{['Onde foi meu dinheiro este mês?','Posso comprar uma TV de €600?','Quanto posso gastar até o pagamento?','Há cobranças duplicadas?'].map((prompt) => <button className="prompt-card" key={prompt} onClick={() => { setAssistantQuestion(prompt); askAssistant(prompt); }}>{prompt}</button>)}</div>{assistantAnswer && <div className={`assistant-answer ${assistantAnswer.status ?? ''}`}><b>JF</b><p>{assistantAnswer.answer}</p>{assistantAnswer.evidence.length > 0 && <ul>{assistantAnswer.evidence.map((item) => <li key={item}>{item}</li>)}</ul>}<small>Confiança {assistantAnswer.confidence === 'high' ? 'alta' : assistantAnswer.confidence === 'medium' ? 'média' : 'baixa'} · escopo: {assistantAnswer.dataScope ?? 'estado financeiro'} · {currency}</small></div>}<div className="assistant-input"><input value={assistantQuestion} onChange={(event) => setAssistantQuestion(event.target.value)} placeholder="Pergunte sobre seu dinheiro" onKeyDown={(event) => event.key === 'Enter' && askAssistant()} /><button onClick={() => askAssistant()}><Send size={18} /></button></div></section>}
+      {activeTab === 'discoveries' && <section className="discoveries-page">
+        <span className="eyebrow">DESCOBERTAS</span>
+        <h1>Contexto que<br />leva a uma ação.</h1>
+        <p>Primeiro vêm riscos e oportunidades. Curiosidades continuam existindo, porque números também gostam de conversa fiada, mas agora ficam no lugar certo.</p>
+        <nav className="discoveries-tabs" aria-label="Tipos de descobertas"><button type="button" className={discoveriesView === 'now' ? 'active' : ''} onClick={() => setDiscoveriesView('now')}>Agora <span>{nowImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'opportunity' ? 'active' : ''} onClick={() => setDiscoveriesView('opportunity')}>Oportunidades <span>{opportunityImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'patterns' ? 'active' : ''} onClick={() => setDiscoveriesView('patterns')}>Padrões <span>{insightResult.insights.length}</span></button></nav>
+
+        {discoveriesView === 'now' && <div className="impact-stack">{nowImpactInsights.length ? nowImpactInsights.map((insight) => <ImpactInsightCard key={insight.id} insight={insight} onAction={openImpactAction} />) : <section className="panel empty compact-empty"><BadgeCheck size={30} /><p>Nenhuma ação urgente identificada com os dados atuais.</p></section>}</div>}
+
+        {discoveriesView === 'opportunity' && <div className="impact-stack">{opportunityImpactInsights.length ? opportunityImpactInsights.map((insight) => <ImpactInsightCard key={insight.id} insight={insight} onAction={openImpactAction} />) : <section className="panel empty compact-empty"><Lightbulb size={30} /><p>Nenhuma oportunidade suficientemente comprovada por enquanto.</p></section>}</div>}
+
+        {discoveriesView === 'patterns' && <>
+          <div className="discoveries-summary"><article><Sparkles size={21} /><div><b>{insightResult.insights.length}</b><small>padrões visíveis</small></div></article><article><ChartNoAxesCombined size={21} /><div><b>{analytics.current.expenseTransactionCount}</b><small>movimentações analisadas</small></div></article><article><CalendarClock size={21} /><div><b>{analytics.current.observedDays}</b><small>dias observados</small></div></article></div>
+          <section className="panel comparison-panel">
+            <div className="panel-title"><div><small>COMPARAÇÃO EQUIVALENTE</small><h2>Período atual x anterior</h2></div><ChartNoAxesCombined size={21} /></div>
+            <p className="comparison-range">{formatReportingDate(comparison.currentRange.start)} a {formatReportingDate(comparison.currentRange.end)} <span>contra</span> {formatReportingDate(comparison.previousRange.start)} a {formatReportingDate(comparison.previousRange.end)}</p>
+            {comparison.comparable && <div className="comparison-metrics">{comparison.metrics.map((metric) => {
+              const improved = metric.favorableWhenLower ? metric.differenceCents < 0 : metric.differenceCents > 0;
+              const comparisonTone = metric.differenceCents === 0 ? 'neutral' : improved ? 'positive' : 'negative';
+              const differencePrefix = metric.differenceCents === 0 ? '' : metric.differenceCents > 0 ? '+' : '-';
+              return <article key={metric.label}><small>{metric.label}</small><strong>{formatMoney(metric.currentCents, currency)}</strong><span className={comparisonTone}>{differencePrefix}{formatMoney(Math.abs(metric.differenceCents), currency)}{metric.percentChange !== undefined ? ` · ${Math.round(metric.percentChange * 100)}%` : ''}</span><em>anterior: {formatMoney(metric.previousCents, currency)}</em></article>;
+            })}</div>}
+            <div className="comparison-explanations">{comparison.explanations.map((explanation) => <article className={explanation.tone} key={explanation.id}><b>{explanation.title}</b><p>{explanation.body}</p></article>)}</div>
+            {comparison.comparable && <small className="comparison-note">Os dois lados usam a mesma quantidade de dias observados.</small>}
+          </section>
+          <div className="insight-stack discoveries-stack">{insightResult.insights.length ? insightResult.insights.map((insight) => <InsightCard key={insight.key} insight={insight} onAction={openInsightAction} onUseful={(item) => updateInsightFeedback(item, { useful: true, lastShownAt: new Date().toISOString() })} onDismiss={(item) => updateInsightFeedback(item, { dismissedAt: new Date().toISOString() })} />) : <section className="panel empty compact-empty"><Sparkles size={30} /><p>Ainda não há histórico suficiente para padrões confiáveis.</p></section>}</div>
+        </>}
+      </section>}
+
+      {activeTab === 'assistant' && <section className="assistant-page"><span className="eyebrow">ASSISTENTE DETERMINÍSTICO</span><h1>Converse com<br />seus números.</h1><p>Ele não inventa saldo nem usa IA para decidir. O motor responde a partir da reconciliação, do forecast e dos compromissos cadastrados.</p><label className="assistant-account-selector">Conta-alvo<select aria-label="Conta-alvo do assistente" value={assistantTargetAccountId} onChange={(event) => setAssistantTargetAccountId(event.target.value)}><option value="">Selecione uma conta</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><div className="prompt-grid">{['Onde foi meu dinheiro este mês?','Posso comprar uma TV de €600?','Quanto posso gastar até o pagamento?','Há cobranças duplicadas?'].map((prompt) => <button type="button" className="prompt-card" key={prompt} onClick={() => { setAssistantQuestion(prompt); askAssistant(prompt); }}>{prompt}</button>)}</div>{assistantAnswer && <div className={`assistant-answer ${assistantAnswer.status ?? ''}`}><b>JF</b><p>{assistantAnswer.answer}</p>{assistantAnswer.evidence.length > 0 && <ul>{assistantAnswer.evidence.map((item) => <li key={item}>{item}</li>)}</ul>}<small>Confiança {assistantAnswer.confidence === 'high' ? 'alta' : assistantAnswer.confidence === 'medium' ? 'média' : 'baixa'} · escopo: {assistantAnswer.dataScope ?? 'estado financeiro'} · {currency}</small></div>}<div className="assistant-input"><input value={assistantQuestion} onChange={(event) => setAssistantQuestion(event.target.value)} placeholder="Pergunte sobre seu dinheiro" onKeyDown={(event) => event.key === 'Enter' && askAssistant()} /><button type="button" onClick={() => askAssistant()}><Send size={18} /></button></div></section>}
 
       {activeTab === 'accounts' && <section className="settings-page">
-        <span className="eyebrow">MAIS</span><h1>Configurações<br />sem caça ao menu.</h1>
-        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name}</option>)}</select><button onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise ou PDF Revolut digital. A prévia explica o que foi reconhecido antes de gravar.</small></div>
-        <div className="settings-actions"><button className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount > 0 ? `(${pendingCount})` : ''}</button><button className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
-        <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
+        <span className="eyebrow">MAIS</span><h1>Contas, dados<br />e controle.</h1>
+
+        <section className="currency-overview"><div className="section-heading"><div><span className="eyebrow">POSIÇÃO POR MOEDA</span><h2>Saldo consolidado sem esconder as contas</h2></div></div>{allCurrencyPositions.map((position) => <article key={position.currency}><header><div><small>{position.currency}</small><strong>{position.currentBalanceCents !== undefined ? formatMoney(position.currentBalanceCents, position.currency) : 'saldo incompleto'}</strong></div><span className={`balance-confidence ${position.confidence}`}>{position.confidence === 'confirmed' ? 'Confirmado' : position.confidence === 'estimated' ? 'Estimado' : position.confidence === 'stale' ? 'Desatualizado' : 'Precisa confirmar'}</span></header><div>{position.positions.map((accountPosition) => <span key={accountPosition.account.id}><small>{accountPosition.account.name} · {institutionName(accountPosition.account.institution)}</small><b>{accountPosition.currentBalanceCents !== undefined ? formatMoney(accountPosition.currentBalanceCents, position.currency) : 'não informado'}</b></span>)}</div></article>)}</section>
+
+        <section className="panel institution-summary"><div className="panel-title"><div><small>INSTITUIÇÕES · {currency}</small><h2>Wise e Revolut separadas</h2></div><Building2 size={20} /></div>{currencyAnalytics.institutions.length ? <div className="institution-list">{currencyAnalytics.institutions.map((summary) => <article key={summary.institution}><header><b>{institutionName(summary.institution)}</b><small>{summary.accountCount} {summary.accountCount === 1 ? 'conta' : 'contas'} · {summary.transactionCount} movimentos</small></header><div><span><small>Entrou</small><b className="positive">{formatMoney(summary.inflowCents, currency)}</b></span><span><small>Saiu</small><b>{formatMoney(summary.outflowCents, currency)}</b></span><span><small>Taxas</small><b className="negative">{formatMoney(summary.feeCents, currency)}</b></span><span><small>Conversões</small><b>{summary.conversionCount}</b></span></div></article>)}</div> : <p className="muted">Nenhuma movimentação encontrada nesta moeda.</p>}</section>
+
+        <section className="panel fx-panel"><div className="panel-title"><div><small>MOEDAS E CÂMBIO</small><h2>Conversões e custo explícito</h2></div><ArrowLeftRight size={20} /></div><div className="fx-summary"><span><small>Volume convertido em {currency}</small><b>{formatMoney(currencyAnalytics.convertedOutflowCents, currency)}</b></span><span><small>Taxas explícitas</small><b className="negative">{formatMoney(currencyAnalytics.explicitFeeCents, currency)}</b></span><span><small>Conversões identificadas</small><b>{currencyAnalytics.conversionCount}</b></span><span><small>Sem par vinculado</small><b>{unpairedConversionCount}</b></span></div>{currencyAnalytics.effectiveConversions.length > 0 && <div className="conversion-list">{currencyAnalytics.effectiveConversions.slice(0, 6).map((conversion) => <article key={conversion.groupId}><div><b>{conversion.sourceCurrency} → {conversion.targetCurrency}</b><small>{formatReportingDate(conversion.reportingDate)} · {institutionName(conversion.institution)}</small></div><span><strong>{formatMoney(conversion.sourceAmountCents, conversion.sourceCurrency)} → {formatMoney(conversion.targetAmountCents, conversion.targetCurrency)}</strong><small>câmbio efetivo {conversion.effectiveRate.toFixed(4).replace('.', ',')} · taxa {formatMoney(conversion.explicitFeeCents, conversion.sourceCurrency)}</small></span></article>)}</div>}<p className="muted">O custo explícito vem do extrato. Spread contra o mercado exige uma referência histórica externa e, por isso, não é inventado nesta versão.</p></section>
+
+        <section className="panel integrity-panel"><div className="panel-title"><div><small>INTEGRIDADE VISÍVEL</small><h2>Quanto o aplicativo realmente sabe</h2></div><ShieldCheck size={20} /></div><div className="integrity-grid"><span><small>Saldo</small><b>{balanceConfidenceLabel}</b></span><span><small>Histórico disponível</small><b>{currencyHistoryStart && currencyHistoryEnd ? `${formatReportingDate(currencyHistoryStart)} a ${formatReportingDate(currencyHistoryEnd)}` : 'sem dados'}</b></span><span><small>Pendências críticas</small><b>{criticalPendingCount}</b></span><span><small>Pares internos sugeridos</small><b>{internalTransferSuggestions.length}</b></span><span><small>Conversões sem par</small><b>{unpairedConversionCount}</b></span><span><small>Detalhamentos</small><b>{financeState.transactionAllocations.filter((allocation) => financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)).length}</b></span></div></section>
+
+        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name} · {institutionName(account.institution)}</option>)}</select><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise ou PDF Revolut digital. Instituição, conta, moeda e origem permanecem separadas após a importação.</small></div>
+        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
         <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
       </section>}
 
-      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
+      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
         <ReviewGroupsPanel groups={currencyReviewGroups} transactions={visibleTransactions} categories={financeState.categories} apply={applyReviewGroup} resolveWithoutCategory={resolveReviewGroupWithoutCategory} defer={postponeReviewGroup} reopen={reactivateReviewGroup} applyOne={applyReviewException} />
         {eventsNeedingAccountReview.length > 0 && <section className="panel issues"><h3>Eventos sem conta</h3><p>Escolha a conta para reativá-los no forecast.</p>{eventsNeedingAccountReview.map((item) => <article key={item.id}><b>{item.title}</b><p>{item.dueDate} · {formatMoney(item.amountCents, item.currency)}</p><label>Conta<select aria-label={`Conta para ${item.title}`} defaultValue="" onChange={(event) => event.target.value && resolvePlannedEventAccount(item.id, event.target.value)}><option value="">Selecionar conta</option>{activeAccounts.filter((account) => account.currency === item.currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label></article>)}</section>}
-        {unresolvedIssues.length > 0 && <section className="panel issues"><h3>Pendências de importação</h3>{unresolvedIssues.map((item) => <article key={item.id}><b>{item.kind.replaceAll('_', ' ')}</b><p>{item.message}</p><small>{accountName(item.accountId)}{item.rowNumber ? ` · linha ${item.rowNumber}` : ''}</small><button onClick={() => dismissIssue(item)}>Marcar como revisada</button></article>)}</section>}
+        {unresolvedIssues.length > 0 && <section className="panel issues"><h3>Pendências de importação</h3>{unresolvedIssues.map((item) => <article key={item.id}><b>{item.kind.replaceAll('_', ' ')}</b><p>{item.message}</p><small>{accountName(item.accountId)}{item.rowNumber ? ` · linha ${item.rowNumber}` : ''}</small><button type="button" onClick={() => dismissIssue(item)}>Marcar como revisada</button></article>)}</section>}
         {reviewTransactions.length > 0 && renderTransactions(reviewTransactions.filter((item) => item.currency === currency), true)}
       </>}</section>}
 
       <input ref={input} hidden type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && onFile(event.target.files[0])} />
       <input ref={backupInput} hidden type="file" accept=".json,application/json" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && restoreBackup(event.target.files[0])} />
-      <nav className="bottom-nav"><button className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button className={activeTab === 'discoveries' ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Descobertas</span></button><button className={activeTab === 'assistant' ? 'active' : ''} onClick={() => setActiveTab('assistant')}><MessageSquare size={20} /><span>Assistente</span></button><button className={activeTab === 'accounts' || activeTab === 'review' ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
+      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' || activeTab === 'assistant' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={activeTab === 'discoveries' ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Descobertas</span></button><button type="button" className={activeTab === 'accounts' || activeTab === 'review' ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
 
       {syncConflict && <SyncConflictModal conflict={syncConflict} busy={conflictBusy} message={error} exportLocal={() => exportState(syncConflict.localState)} keepLocal={keepLocalConflictVersion} useRemote={useRemoteConflictVersion} />}
       {preview && <ImportPreview preview={preview} includePossibleDuplicates={includePossibleDuplicates} setIncludePossibleDuplicates={setIncludePossibleDuplicates} allowPartial={allowPartial} setAllowPartial={setAllowPartial} close={() => setPreview(null)} confirm={confirmImport} />}
       {manualOpen && <ManualModal accounts={activeAccounts} categories={financeState.categories} close={() => setManualOpen(false)} add={(transaction) => { createCheckpoint(userId, financeState, 'Antes de transação manual'); setState(withRebuiltReviewGroups({ ...financeState, transactions: [transaction, ...financeState.transactions] })); setManualOpen(false); }} />}
-      {accountOpen && <AccountModal accounts={financeState.accounts} close={() => setAccountOpen(false)} save={(account) => { setState({ ...financeState, accounts: [...financeState.accounts, account] }); setAccountOpen(false); }} />}
+      {accountOpen && <AccountModal accounts={financeState.accounts} close={() => setAccountOpen(false)} activate={(accountId) => { createCheckpoint(userId, financeState, `Antes de ativar conta ${accountName(accountId)}`); setState({ ...financeState, accounts: financeState.accounts.map((account) => account.id === accountId ? { ...account, active: true } : account) }); }} save={(account) => { setState({ ...financeState, accounts: [...financeState.accounts, account] }); setAccountOpen(false); }} />}
       {reconciliationOpen && <ReconciliationModal accounts={activeAccounts.filter((account) => account.currency === currency)} currency={currency} close={() => setReconciliationOpen(false)} confirm={confirmReconciliation} />}
       {reserveOpen && <ReserveModal currency={currency} policy={reservePolicy} close={() => setReserveOpen(false)} save={(policy) => { setState({ ...financeState, reservePolicies: [...financeState.reservePolicies.filter((item) => item.currency !== currency), policy] }); setReserveOpen(false); }} />}
       {plannedEventOpen && <PlannedEventModal accounts={activeAccounts} currency={currency} close={() => setPlannedEventOpen(false)} save={(plannedEvent) => { setState({ ...financeState, plannedEvents: [...financeState.plannedEvents, plannedEvent] }); setPlannedEventOpen(false); }} />}
       {categoryOpen && <CategoryManagerModal categories={financeState.categories} rules={financeState.rules} transactionCountByCategory={transactionCountByCategory} close={() => setCategoryOpen(false)} create={createCategory} rename={renameCategory} archive={archiveCategory} restore={restoreCategory} removeRule={removeCategoryRule} />}
       {merchantLearning && <MerchantLearningModal transaction={merchantLearning.transaction} category={merchantLearning.category} close={() => setMerchantLearning(null)} remember={rememberMerchantRule} />}
       {bulkRuleOpen && <BulkRuleModal candidates={filtered} categories={financeState.categories} currency={currency} close={() => setBulkRuleOpen(false)} apply={applyBulkRule} />}
+      {transferDetailTransaction && <TransferDetailModal transaction={transferDetailTransaction} allocations={financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transferDetailTransaction.id)} categories={financeState.categories} close={() => setTransferDetailTransaction(null)} save={saveTransferDetail} />}
     </main>
   );
 
@@ -1372,7 +1602,7 @@ function ReconciliationModal({ accounts, currency, close, confirm }: {
   }
 
   return <div className="modal-bg"><section className="modal wide-modal">
-    <button className="close" onClick={close}><X size={17} /></button>
+    <button type="button" className="close" onClick={close}><X size={17} /></button>
     <span className="eyebrow">RECONCILIAÇÃO ATÓMICA</span>
     <h2>Atualizar saldos em conjunto</h2>
     <p>Todos os saldos abaixo serão gravados no mesmo lote e no mesmo instante lógico.</p>
@@ -1428,9 +1658,9 @@ function SyncConflictModal({ conflict, busy, message, exportLocal, keepLocal, us
     {message && <div className="form-message error">{message}</div>}
     <div className="conflict-note"><CircleAlert size={18} /><span>O aplicativo não tenta mesclar transações automaticamente porque uma fusão errada seria só perda de dados usando gravata.</span></div>
     <footer className="conflict-actions">
-      <button className="secondary" disabled={busy} onClick={exportLocal}><Download size={17} />Baixar backup local</button>
-      <button className="secondary" disabled={busy} onClick={useRemote}>Usar versão da nuvem</button>
-      <button disabled={busy} onClick={keepLocal}>{busy ? <RefreshCw className="spin" size={17} /> : null}Manter este aparelho</button>
+      <button type="button" className="secondary" disabled={busy} onClick={exportLocal}><Download size={17} />Baixar backup local</button>
+      <button type="button" className="secondary" disabled={busy} onClick={useRemote}>Usar versão da nuvem</button>
+      <button type="button" disabled={busy} onClick={keepLocal}>{busy ? <RefreshCw className="spin" size={17} /> : null}Manter este aparelho</button>
     </footer>
   </section></div>;
 }
@@ -1448,7 +1678,7 @@ function ImportPreview({ preview, includePossibleDuplicates, setIncludePossibleD
   const withoutCategory = preview.newTransactions.filter((item) => item.categoryReviewStatus === 'pending').length;
   const internalTransfers = preview.newTransactions.filter((item) => item.technicalType === 'internal_transfer' || item.technicalType === 'currency_conversion').length;
   const refunds = preview.newTransactions.filter((item) => item.technicalType === 'refund').length;
-  return <div className="modal-bg"><section className="modal wide-modal"><button className="close" onClick={close}><X size={17} /></button><span className="eyebrow">PRÉVIA SEGURA</span><h2>{preview.batch.fileName}</h2><p>Destino: <b>{preview.account.name}</b>. Nenhuma linha é gravada antes da confirmação.</p>
+  return <div className="modal-bg"><section className="modal wide-modal"><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">PRÉVIA SEGURA</span><h2>{preview.batch.fileName}</h2><p>Destino: <b>{preview.account.name}</b>. Nenhuma linha é gravada antes da confirmação.</p>
     <div className="preview-explainer"><b>O que o app entendeu</b><p>Transferências internas e conversões ficam fora do fluxo. Transferências externas contam pela direção, e reembolsos reduzem as saídas. O que continuar ambíguo será perguntado depois, sem sumir discretamente num porão contábil.</p></div>
     <div className="preview-smart-grid"><div><b>{technicallyIdentified}</b><small>tipos identificados</small></div><div><b>{internalTransfers}</b><small>internas ou conversões</small></div><div><b>{refunds}</b><small>reembolsos</small></div><div><b>{withoutCategory}</b><small>para revisar em grupos</small></div></div>
     <div className="preview-grid"><div><b>{preview.newTransactions.length}</b><small>novas</small></div><div><b>{preview.confirmedDuplicateIds.length}</b><small>duplicatas certas</small></div><div><b>{preview.possibleDuplicates.length}</b><small>possíveis</small></div><div><b>{preview.issues.length}</b><small>pendências técnicas</small></div></div>
@@ -1456,7 +1686,7 @@ function ImportPreview({ preview, includePossibleDuplicates, setIncludePossibleD
     {preview.issues.length > 0 && <details open><summary>Linhas que exigem atenção</summary>{preview.issues.slice(0, 12).map((item) => <p key={item.id}>• {item.message}</p>)}</details>}
     {preview.possibleDuplicates.length > 0 && <label className="duplicate-choice"><input type="checkbox" checked={includePossibleDuplicates} onChange={(event) => setIncludePossibleDuplicates(event.target.checked)} /><span>Importar também as possíveis duplicatas. Elas continuarão marcadas para revisão.</span></label>}
     {preview.blockingIssueCount > 0 && <label className="duplicate-choice danger"><input type="checkbox" checked={allowPartial} onChange={(event) => setAllowPartial(event.target.checked)} /><span>Confirmar importação parcial mesmo com {preview.blockingIssueCount} linha(s) rejeitada(s). Os problemas serão preservados na lista de pendências.</span></label>}
-    <footer><button className="secondary" onClick={close}>Cancelar</button><button disabled={preview.blockingIssueCount > 0 && !allowPartial} onClick={confirm}>Confirmar importação</button></footer>
+    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="button" disabled={preview.blockingIssueCount > 0 && !allowPartial} onClick={confirm}>Confirmar importação</button></footer>
   </section></div>;
 }
 
@@ -1540,11 +1770,11 @@ function ManualModal({ accounts, categories, close, add }: { accounts: Account[]
     <label>Descrição<input required value={description} onChange={(event) => setDescription(event.target.value)} /></label>
     <div className="form-grid"><label>Direção<select value={direction} onChange={(event) => changeDirection(event.target.value as 'inflow' | 'outflow')}><option value="outflow">Saída</option><option value="inflow">Entrada</option></select></label><label>Tipo técnico<select value={technicalType} onChange={(event) => { setTechnicalType(event.target.value as TechnicalMovementType); setCategoryId(''); }}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select></label></div>
     <label>Categoria opcional<select value={categoryId} disabled={!isCategoryReviewApplicable(technicalType)} onChange={(event) => setCategoryId(event.target.value)}><option value="">Sem categoria</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
-    {error && <div className="form-message error">{error}</div>}<footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button>Adicionar</button></footer>
+    {error && <div className="form-message error">{error}</div>}<footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="submit">Adicionar</button></footer>
   </form></div>;
 }
 
-function AccountModal({ accounts, close, save }: { accounts: Account[]; close: () => void; save: (account: Account) => void }) {
+function AccountModal({ accounts, close, save, activate }: { accounts: Account[]; close: () => void; save: (account: Account) => void; activate: (accountId: string) => void }) {
   const [name, setName] = useState('');
   const [currency, setCurrency] = useState('EUR');
   const [institution, setInstitution] = useState<Account['institution']>('cash');
@@ -1564,8 +1794,8 @@ function AccountModal({ accounts, close, save }: { accounts: Account[]; close: (
     const id = `${institution}-${cleanCurrency.toLowerCase()}-${crypto.randomUUID().slice(0, 6)}`;
     save({ id, name: cleanName, currency: cleanCurrency, institution, active: true });
   }
-  return <div className="modal-bg"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">CONTAS</span><h2>Adicionar conta</h2><p className="muted">Atuais: {accounts.map((account) => account.name).join(', ')}</p>
-    <label>Nome<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Dinheiro EUR" /></label><div className="form-grid"><label>Moeda<input required maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value)} /></label><label>Instituição<select value={institution} onChange={(event) => setInstitution(event.target.value as Account['institution'])}><option value="cash">Dinheiro físico</option><option value="other">Outra</option><option value="revolut">Revolut</option><option value="wise">Wise</option></select></label></div>{error && <div className="form-message error">{error}</div>}<footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button>Criar conta</button></footer>
+  return <div className="modal-bg"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">CONTAS</span><h2>Gerenciar contas</h2><div className="account-manager-list">{accounts.map((account) => <article key={account.id}><div><b>{account.name}</b><small>{account.currency} · {account.institution === 'revolut' ? 'Revolut' : account.institution === 'wise' ? 'Wise' : account.institution}</small></div>{account.active ? <span>Ativa</span> : <button type="button" className="secondary" onClick={() => activate(account.id)}>Ativar</button>}</article>)}</div><h3>Adicionar outra conta</h3>
+    <label>Nome<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Wise EUR" /></label><div className="form-grid"><label>Moeda<input required maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value)} /></label><label>Instituição<select value={institution} onChange={(event) => setInstitution(event.target.value as Account['institution'])}><option value="cash">Dinheiro físico</option><option value="other">Outra</option><option value="revolut">Revolut</option><option value="wise">Wise</option></select></label></div>{error && <div className="form-message error">{error}</div>}<footer><button type="button" className="secondary" onClick={close}>Fechar</button><button type="submit">Criar conta</button></footer>
   </form></div>;
 }
 

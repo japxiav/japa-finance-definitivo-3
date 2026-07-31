@@ -111,6 +111,35 @@ function ranked(
     .sort((a, b) => b.amountCents - a.amountCents || b.transactionCount - a.transactionCount || a.key.localeCompare(b.key));
 }
 
+
+function rankedCategories(
+  transactions: Transaction[],
+  totalCents: number,
+  state: AppState,
+): RankedAmount[] {
+  const allocationsByTransaction = new Map<string, AppState['transactionAllocations']>();
+  for (const allocation of state.transactionAllocations) {
+    const current = allocationsByTransaction.get(allocation.transactionId) ?? [];
+    current.push(allocation);
+    allocationsByTransaction.set(allocation.transactionId, current);
+  }
+  const map = new Map<string, { amountCents: number; transactionCount: number }>();
+  const add = (key: string, amountCents: number) => {
+    const current = map.get(key) ?? { amountCents: 0, transactionCount: 0 };
+    map.set(key, { amountCents: addCents(current.amountCents, amountCents), transactionCount: current.transactionCount + 1 });
+  };
+  for (const transaction of transactions) {
+    const magnitude = Math.abs(signedNetMovement(transaction));
+    const allocations = allocationsByTransaction.get(transaction.id) ?? [];
+    const allocated = allocations.reduce((total, allocation) => addCents(total, allocation.amountCents), 0);
+    if (allocations.length > 0 && allocated === magnitude) {
+      for (const allocation of allocations) add(allocation.categoryId ?? 'uncategorized', allocation.amountCents);
+    } else add(transaction.categoryId ?? 'uncategorized', magnitude);
+  }
+  return [...map.entries()]
+    .map(([key, item]) => ({ key, ...item, share: totalCents > 0 ? item.amountCents / totalCents : 0 }))
+    .sort((a, b) => b.amountCents - a.amountCents || b.transactionCount - a.transactionCount || a.key.localeCompare(b.key));
+}
 function longestNoSpend(range: Required<DateRange>, expenseDates: Set<string>, effectiveEnd: string): number {
   if (effectiveEnd < range.start) return 0;
   let longest = 0;
@@ -129,11 +158,12 @@ function longestNoSpend(range: Required<DateRange>, expenseDates: Set<string>, e
 }
 
 function snapshot(
-  allTransactions: Transaction[],
+  state: AppState,
   currency: string,
   range: Required<DateRange>,
   latestReportingDate?: string,
 ): MetricsSnapshot {
+  const allTransactions = state.transactions;
   const transactions = allTransactions.filter((transaction) =>
     transaction.status === 'completed'
     && transaction.currency === currency
@@ -147,7 +177,8 @@ function snapshot(
   const excludedTransfers = transactions.filter((transaction) =>
     transaction.kind === 'transfer' && transaction.analysisExcluded);
   const unknown = analytical.filter((transaction) => transaction.kind === 'unknown');
-  const uncategorized = analytical.filter((transaction) => !transaction.categoryId);
+  const allocationsByTransaction = new Map(state.transactionAllocations.map((allocation) => [allocation.transactionId, true]));
+  const uncategorized = analytical.filter((transaction) => !transaction.categoryId && !allocationsByTransaction.has(transaction.id));
   const summary = cashflowSummary(allTransactions, currency, range);
   const effectiveEnd = clampEffectiveEnd(range, latestReportingDate);
   const expenseDates = new Set(expenses.map((transaction) => transaction.reportingDate));
@@ -172,7 +203,7 @@ function snapshot(
     daysWithoutExpense: Math.max(0, observedDays - expenseDates.size),
     longestNoSpendStreak: longestNoSpend(range, expenseDates, effectiveEnd),
     averageExpenseCents: expenses.length ? Math.round(summary.expenseCents / expenses.length) : 0,
-    byCategory: ranked(expenses, summary.expenseCents, (transaction) => transaction.categoryId ?? 'uncategorized'),
+    byCategory: rankedCategories(expenses, summary.expenseCents, state),
     byMerchant: ranked(expenses, summary.expenseCents, (transaction) => transaction.merchantNormalized || transaction.descriptionOriginal),
     byWeekday: ranked(expenses, summary.expenseCents, (transaction) => dateToWeekday(transaction.reportingDate)),
     byDaypart: ranked(expenses, summary.expenseCents, daypart),
@@ -216,8 +247,8 @@ export function buildAnalytics(
   return {
     currency,
     latestReportingDate,
-    current: snapshot(state.transactions, currency, currentRange, latestReportingDate),
-    previous: snapshot(state.transactions, currency, previousRange(currentRange), latestReportingDate),
+    current: snapshot(state, currency, currentRange, latestReportingDate),
+    previous: snapshot(state, currency, previousRange(currentRange), latestReportingDate),
   };
 }
 

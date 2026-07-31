@@ -1,7 +1,7 @@
 import type { AppState } from '../core/types';
 
 export const initialState: AppState = {
-  schemaVersion: 8,
+  schemaVersion: 9,
   accounts: [
     { id: 'revolut-eur', name: 'Revolut EUR', currency: 'EUR', institution: 'revolut', active: true },
     { id: 'revolut-brl', name: 'Revolut BRL', currency: 'BRL', institution: 'revolut', active: false },
@@ -35,6 +35,8 @@ export const initialState: AppState = {
   insightFeedback: [],
   reviewGroups: [],
   reviewDecisions: [],
+  transactionAllocations: [],
+  internalTransferDecisions: [],
   rules: [
     { id: 'default-tesco', pattern: 'tesco', kind: 'contains', categoryId: 'groceries', order: 10, source: 'default' },
     { id: 'default-lidl', pattern: 'lidl', kind: 'contains', categoryId: 'groceries', order: 11, source: 'default' },

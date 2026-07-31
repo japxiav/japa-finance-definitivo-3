@@ -1,8 +1,8 @@
-import type { AppState, Category, ImportIssue, ReviewDecision, ReviewGroup, SyncMetadata, TechnicalMovementType, Transaction } from './types';
+import type { AppState, Category, ImportIssue, InternalTransferDecision, ReviewDecision, ReviewGroup, SyncMetadata, TechnicalMovementType, Transaction, TransactionAllocation } from './types';
 import { canAddCents } from '../domain/arithmetic';
 import { civilDateFromUtcInstant, civilDaysBetween, isCivilDate } from '../domain/dates';
 import { localCivilDateFromInstant } from './date';
-import { isTransactionKindDirectionCompatible } from './finance';
+import { isTransactionKindDirectionCompatible, signedNetMovement } from './finance';
 import { buildReviewGroups } from '../classification/grouping';
 import { normalizeMerchant } from './merchant';
 import { parseMoneyToCents } from './money';
@@ -289,7 +289,7 @@ function isBankReverted(raw?: string): boolean {
   return /revert|reversal|reversed|revertida|revertido|estornada|estornado/i.test(raw ?? '');
 }
 
-function migrateV7(candidate: Record<string, unknown>): AppState {
+function migrateV7(candidate: Record<string, unknown>): Record<string, unknown> {
   const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
   const existingFeeParents = new Set(oldTransactions
     .filter((transaction) => transaction.sourceComponent === 'fee' && transaction.feeOfTransactionId)
@@ -375,10 +375,19 @@ function migrateV7(candidate: Record<string, unknown>): AppState {
   }
 
   return {
-    ...(candidate as unknown as Omit<AppState, 'schemaVersion' | 'transactions' | 'reviewGroups'>),
+    ...(candidate as object),
     schemaVersion: 8,
     transactions,
     reviewGroups: [],
+  };
+}
+
+function migrateV8(candidate: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(candidate as object),
+    schemaVersion: 9,
+    transactionAllocations: [],
+    internalTransferDecisions: [],
   };
 }
 
@@ -411,14 +420,19 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 7) {
     return normalizeState(migrateV7(candidate), fallback);
   }
-  if (candidate.schemaVersion !== 8) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 8) {
+    return normalizeState(migrateV8(candidate), fallback);
+  }
+  if (candidate.schemaVersion !== 9) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
   candidate.insightFeedback ??= [];
   candidate.reviewGroups ??= [];
   candidate.reviewDecisions ??= [];
-  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions'];
+  candidate.transactionAllocations ??= [];
+  candidate.internalTransferDecisions ??= [];
+  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions'];
   for (const key of requiredArrays) {
     if (!Array.isArray(candidate[key])) throw new Error(`Backup inválido: ${key} não é uma lista`);
   }
@@ -659,6 +673,63 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     } else if (transaction.feeOfTransactionId !== undefined) {
       throw new Error('Backup contém vínculo de taxa em movimentação principal');
     }
+  }
+
+
+  const allocationIds = new Set<string>();
+  const allocationTotals = new Map<string, number>();
+  for (const allocation of state.transactionAllocations as TransactionAllocation[]) {
+    if (!nonEmpty(allocation.id) || allocationIds.has(allocation.id)) throw new Error('Backup contém detalhamentos duplicados ou sem ID');
+    allocationIds.add(allocation.id);
+    const transaction = transactionByIdForFees.get(allocation.transactionId);
+    if (!transaction || transaction.kind !== 'transfer' || transaction.status === 'reverted') {
+      throw new Error('Backup contém detalhamento ligado a movimentação incompatível');
+    }
+    if (!nonEmpty(allocation.label) || !Number.isSafeInteger(allocation.amountCents) || allocation.amountCents <= 0) {
+      throw new Error('Backup contém item de detalhamento inválido');
+    }
+    if (allocation.categoryId !== undefined && !categoryIds.has(allocation.categoryId)) throw new Error('Backup contém detalhamento ligado a categoria inexistente');
+    if (allocation.purpose !== undefined && !oneOf(allocation.purpose, ['subscription', 'housing', 'family', 'support', 'debt', 'groceries', 'leisure', 'reimbursement', 'other'] as const)) {
+      throw new Error('Backup contém finalidade de transferência inválida');
+    }
+    if (allocation.relatedPerson !== undefined && !nonEmpty(allocation.relatedPerson)) throw new Error('Backup contém pessoa relacionada inválida');
+    if (allocation.recurring !== undefined && typeof allocation.recurring !== 'boolean') throw new Error('Backup contém recorrência inválida');
+    if (allocation.recurrenceFrequency !== undefined && !oneOf(allocation.recurrenceFrequency, ['weekly', 'monthly', 'yearly'] as const)) throw new Error('Backup contém frequência de recorrência inválida');
+    if (allocation.nextDueDate !== undefined && !isCivilDate(allocation.nextDueDate)) throw new Error('Backup contém próxima data de detalhamento inválida');
+    if (allocation.plannedEventId !== undefined && !nonEmpty(allocation.plannedEventId)) throw new Error('Backup contém vínculo de compromisso inválido');
+    if (allocation.note !== undefined && typeof allocation.note !== 'string') throw new Error('Backup contém nota de detalhamento inválida');
+    if (!validTimestamp(allocation.createdAt) || !validTimestamp(allocation.updatedAt)) throw new Error('Backup contém timestamp de detalhamento inválido');
+    allocation.createdAt = canonicalTimestamp(allocation.createdAt)!;
+    allocation.updatedAt = canonicalTimestamp(allocation.updatedAt)!;
+    if (allocation.updatedAt < allocation.createdAt) throw new Error('Backup contém detalhamento atualizado antes da criação');
+    const current = allocationTotals.get(allocation.transactionId) ?? 0;
+    if (!canAddCents(current, allocation.amountCents)) throw new Error('Backup contém detalhamento acima do limite monetário seguro');
+    allocationTotals.set(allocation.transactionId, current + allocation.amountCents);
+  }
+  for (const [transactionId, allocatedCents] of allocationTotals) {
+    const transaction = transactionByIdForFees.get(transactionId)!;
+    if (allocatedCents !== Math.abs(signedNetMovement(transaction))) {
+      throw new Error('Backup contém detalhamento que não fecha com o valor da movimentação');
+    }
+  }
+
+  const internalDecisionIds = new Set<string>();
+  const internalSuggestionKeys = new Set<string>();
+  for (const decision of state.internalTransferDecisions as InternalTransferDecision[]) {
+    if (!nonEmpty(decision.id) || internalDecisionIds.has(decision.id) || !nonEmpty(decision.suggestionKey) || internalSuggestionKeys.has(decision.suggestionKey)) {
+      throw new Error('Backup contém decisão de transferência interna duplicada ou inválida');
+    }
+    internalDecisionIds.add(decision.id);
+    internalSuggestionKeys.add(decision.suggestionKey);
+    const outflow = transactionByIdForFees.get(decision.outflowTransactionId);
+    const inflow = transactionByIdForFees.get(decision.inflowTransactionId);
+    if (!outflow || !inflow || outflow.direction !== 'outflow' || inflow.direction !== 'inflow' || outflow.accountId === inflow.accountId || outflow.currency !== inflow.currency) {
+      throw new Error('Backup contém decisão de transferência interna incompatível');
+    }
+    if (!oneOf(decision.status, ['confirmed', 'rejected'] as const)) throw new Error('Backup contém estado de transferência interna inválido');
+    if (!validTimestamp(decision.createdAt) || !validTimestamp(decision.updatedAt)) throw new Error('Backup contém timestamp de transferência interna inválido');
+    decision.createdAt = canonicalTimestamp(decision.createdAt)!;
+    decision.updatedAt = canonicalTimestamp(decision.updatedAt)!;
   }
 
   const importIds = new Set<string>();

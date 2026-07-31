@@ -1,4 +1,4 @@
-import type { Transaction, TransactionSource, TechnicalMovementType } from '../core/types';
+import type { Institution, Transaction, TransactionAllocation, TransactionSource, TechnicalMovementType } from '../core/types';
 import { signedNetMovement } from '../core/finance';
 import { parseSignedMoneyToCents } from '../core/money';
 
@@ -6,7 +6,10 @@ export interface TransactionFilters {
   currency: string;
   query: string;
   accountId: string;
+  institution: 'all' | Institution;
+  institutionByAccountId: Map<string, Institution>;
   categoryId: string;
+  allocations: TransactionAllocation[];
   periodStart?: string;
   periodEnd?: string;
   minAmount?: string;
@@ -33,14 +36,23 @@ export function filterTransactions(
 ): Transaction[] {
   const query = filters.query.trim().toLocaleLowerCase('pt-BR');
   const minimum = optionalMoney(filters.minAmount);
+  const allocationsByTransaction = new Map<string, TransactionAllocation[]>();
+  for (const allocation of filters.allocations) {
+    const current = allocationsByTransaction.get(allocation.transactionId) ?? [];
+    current.push(allocation);
+    allocationsByTransaction.set(allocation.transactionId, current);
+  }
   const maximum = optionalMoney(filters.maxAmount);
 
   return transactions.filter((transaction) => {
     if (transaction.currency !== filters.currency) return false;
     if (filters.accountId !== 'all' && transaction.accountId !== filters.accountId) return false;
+    if (filters.institution !== 'all' && filters.institutionByAccountId.get(transaction.accountId) !== filters.institution) return false;
     if (filters.categoryId !== 'all') {
-      if (filters.categoryId === 'uncategorized' && transaction.categoryId) return false;
-      if (filters.categoryId !== 'uncategorized' && transaction.categoryId !== filters.categoryId) return false;
+      const allocations = allocationsByTransaction.get(transaction.id) ?? [];
+      const allocationCategories = new Set(allocations.map((allocation) => allocation.categoryId).filter(Boolean));
+      if (filters.categoryId === 'uncategorized' && (transaction.categoryId || (allocations.length > 0 && allocations.every((allocation) => allocation.categoryId)))) return false;
+      if (filters.categoryId !== 'uncategorized' && transaction.categoryId !== filters.categoryId && !allocationCategories.has(filters.categoryId)) return false;
     }
     if (filters.periodStart && transaction.reportingDate < filters.periodStart) return false;
     if (filters.periodEnd && transaction.reportingDate > filters.periodEnd) return false;
@@ -61,6 +73,7 @@ export function filterTransactions(
       transaction.bankTransactionId ?? '',
       transaction.bankType ?? '',
       transaction.bankProduct ?? '',
+      ...(allocationsByTransaction.get(transaction.id) ?? []).flatMap((allocation) => [allocation.label, allocation.relatedPerson ?? '', allocation.note ?? '']),
     ].join(' ').toLocaleLowerCase('pt-BR');
     return haystack.includes(query);
   });

@@ -84,9 +84,9 @@ export function AuthScreen() {
         </form>
 
         <div className="auth-switches">
-          {mode !== 'signin' && <button className="link-button" onClick={() => setMode('signin')}>Já tenho conta</button>}
-          {mode !== 'signup' && <button className="link-button" onClick={() => setMode('signup')}>Criar minha conta</button>}
-          {mode !== 'forgot' && <button className="link-button" onClick={() => setMode('forgot')}>Esqueci a senha</button>}
+          {mode !== 'signin' && <button type="button" className="link-button" onClick={() => setMode('signin')}>Já tenho conta</button>}
+          {mode !== 'signup' && <button type="button" className="link-button" onClick={() => setMode('signup')}>Criar minha conta</button>}
+          {mode !== 'forgot' && <button type="button" className="link-button" onClick={() => setMode('forgot')}>Esqueci a senha</button>}
         </div>
       </section>
     </main>

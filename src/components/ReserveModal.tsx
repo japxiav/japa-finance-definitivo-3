@@ -32,6 +32,6 @@ export function ReserveModal({ currency, policy, close, save }: {
     <label>Meta opcional<input inputMode="decimal" value={target} onChange={(event) => setTarget(event.target.value)} placeholder="1000,00" /></label>
     {policy && <div className="form-message">Atual: {formatMoney(policy.minimumCents, currency)}</div>}
     {error && <div className="form-message error">{error}</div>}
-    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button>Salvar reserva</button></footer>
+    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="submit">Salvar reserva</button></footer>
   </form></div>;
 }

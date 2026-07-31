@@ -74,7 +74,7 @@ export function BulkRuleModal({
 
   return <div className="modal-bg">
     <section className="modal wide-modal bulk-rule-modal">
-      <button className="close" onClick={close} aria-label="Fechar"><X size={18} /></button>
+      <button type="button" className="close" onClick={close} aria-label="Fechar"><X size={18} /></button>
       <div className="modal-illustration"><Tags size={23} /></div>
       <span className="eyebrow">REGRA EM MASSA</span>
       <h2>Classifique padrões com prévia.</h2>
@@ -118,7 +118,7 @@ export function BulkRuleModal({
         <article><small>ESCOLHAS MANUAIS</small><b>preservadas</b></article>
       </section>
 
-      {preview.length > 0 && <div className="bulk-selection-actions"><button className="link-button" onClick={() => setExceptionIds([])}>Selecionar todas</button><button className="link-button" onClick={() => setExceptionIds(preview.map((transaction) => transaction.id))}>Limpar seleção</button></div>}
+      {preview.length > 0 && <div className="bulk-selection-actions"><button type="button" className="link-button" onClick={() => setExceptionIds([])}>Selecionar todas</button><button type="button" className="link-button" onClick={() => setExceptionIds(preview.map((transaction) => transaction.id))}>Limpar seleção</button></div>}
       <div className="bulk-preview-list">
         {preview.map((transaction) => <label className="bulk-preview-row" key={transaction.id}>
           <input type="checkbox" checked={!exceptionIds.includes(transaction.id)} onChange={() => toggleException(transaction.id)} />
@@ -129,8 +129,8 @@ export function BulkRuleModal({
       </div>
 
       <footer>
-        <button className="secondary" onClick={close}>Cancelar</button>
-        <button disabled={!category || selectedPreview.length === 0} onClick={() => category && apply({
+        <button type="button" className="secondary" onClick={close}>Cancelar</button>
+        <button type="button" disabled={!category || selectedPreview.length === 0} onClick={() => category && apply({
           pattern,
           kind,
           categoryId: category.id,

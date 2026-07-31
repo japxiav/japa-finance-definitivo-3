@@ -80,8 +80,8 @@ function ReviewGroupCard({
       <label className="group-category-select">Categoria<select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="">Escolher categoria</option>{options.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
       <label className="remember-rule"><input type="checkbox" checked={createRule} onChange={(event) => setCreateRule(event.target.checked)} /><span>Criar regra para próximas movimentações</span></label>
       {exceptions > 0 && <small className="exception-count">{exceptions} {exceptions === 1 ? 'exceção ficará' : 'exceções ficarão'} sem alteração.</small>}
-      <div className="review-group-actions"><button className="secondary" onClick={() => defer(group)}><Clock3 size={16} /> Resolver depois</button><button className="secondary" disabled={selectedCount === 0} onClick={() => resolveWithoutCategory(group, [...selectedIds])}><Check size={16} /> Manter sem categoria</button><button disabled={!categoryId || selectedCount === 0} onClick={() => apply(group, [...selectedIds], categoryId, createRule)}><Check size={16} /> Aplicar a {selectedCount}</button></div>
-    </footer> : <footer><button className="secondary" onClick={() => reopen(group)}><RotateCcw size={16} /> Voltar para revisão</button></footer>}
+      <div className="review-group-actions"><button type="button" className="secondary" onClick={() => defer(group)}><Clock3 size={16} /> Resolver depois</button><button type="button" className="secondary" disabled={selectedCount === 0} onClick={() => resolveWithoutCategory(group, [...selectedIds])}><Check size={16} /> Manter sem categoria</button><button type="button" disabled={!categoryId || selectedCount === 0} onClick={() => apply(group, [...selectedIds], categoryId, createRule)}><Check size={16} /> Aplicar a {selectedCount}</button></div>
+    </footer> : <footer><button type="button" className="secondary" onClick={() => reopen(group)}><RotateCcw size={16} /> Voltar para revisão</button></footer>}
   </article>;
 }
 

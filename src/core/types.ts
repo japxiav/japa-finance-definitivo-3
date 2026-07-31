@@ -321,6 +321,48 @@ export interface PlannedTransferRecord {
 export type PlannedEventKind = 'income' | 'expense' | 'transfer' | 'installment' | 'recurring';
 export type RecurrenceFrequency = 'weekly' | 'monthly' | 'yearly';
 
+export type TransferPurpose =
+  | 'subscription'
+  | 'housing'
+  | 'family'
+  | 'support'
+  | 'debt'
+  | 'groceries'
+  | 'leisure'
+  | 'reimbursement'
+  | 'other';
+
+/** Detalhamento econômico de uma movimentação bancária, sem alterar o fato original. */
+export interface TransactionAllocation {
+  id: string;
+  transactionId: string;
+  label: string;
+  amountCents: number;
+  categoryId?: string;
+  purpose?: TransferPurpose;
+  relatedPerson?: string;
+  recurring?: boolean;
+  recurrenceFrequency?: RecurrenceFrequency;
+  nextDueDate?: string;
+  plannedEventId?: string;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type InternalTransferDecisionStatus = 'confirmed' | 'rejected';
+
+/** Registra a decisão humana sobre um par sugerido entre contas próprias. */
+export interface InternalTransferDecision {
+  id: string;
+  suggestionKey: string;
+  outflowTransactionId: string;
+  inflowTransactionId: string;
+  status: InternalTransferDecisionStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PlannedEvent {
   id: string;
   title: string;
@@ -349,7 +391,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 8;
+  schemaVersion: 9;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];
@@ -364,4 +406,6 @@ export interface AppState {
   insightFeedback: InsightFeedback[];
   reviewGroups: ReviewGroup[];
   reviewDecisions: ReviewDecision[];
+  transactionAllocations: TransactionAllocation[];
+  internalTransferDecisions: InternalTransferDecision[];
 }
