@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0-alpha.5 - 2026-07-31
+
+- Adicionado saldo atual por conta e consolidado por moeda, com estado confirmado, estimado, desatualizado ou incompleto.
+- Criada ponte auditável entre saldo reconciliado, fluxo externo, transferências/conversões, taxas, ajustes e saldo calculado.
+- Adicionados dinheiro realmente livre, compromissos até a próxima receita e limite diário seguro.
+- Reorganizada a navegação em Início, Movimentos, Planejar, Descobertas e Mais, com shell fixo e safe areas para PWA instalado no iPhone.
+- Wise e Revolut permanecem instituições distintas; filtros e resumos preservam conta, instituição, moeda e origem do arquivo.
+- Criada detecção de transferências entre contas próprias por valor, moeda, data e evidências de descrição, sempre sujeita a confirmação humana.
+- Adicionados painel de moedas, taxas explícitas por instituição, volume convertido e câmbio efetivo para conversões vinculadas.
+- Transferências externas podem ser divididas por finalidade, categoria, pessoa relacionada, nota e recorrência; a soma é validada contra o lançamento original.
+- Itens recorrentes dentro de transferências podem gerar compromissos futuros e representar assinaturas compartilhadas.
+- Descobertas foram separadas em Agora, Oportunidades e Padrões; linguagem causal e rótulos inadequados foram reduzidos.
+- Adicionado painel de integridade com cobertura histórica, confiança do saldo, pendências, pares internos e conversões sem vínculo.
+- Criada recuperação segura de tela por Error Boundary e proteção de mutações de categoria/tipo com preservação do estado anterior.
+- Todos os botões receberam tipo explícito, evitando submissões acidentais de formulário e interações aparentemente aleatórias.
+- Estado migrado para `schemaVersion: 9`, com migração automática de backups schema 8.
+- Cache do service worker atualizado para Alpha 5.
+- Validação feita por compilação TypeScript direta do núcleo, verificação semântica com stubs externos, transpilação estática e smoke tests determinísticos; npm, Vitest, Vite, Supabase e E2E não foram executados.
+
 ## 0.9.0-alpha.4 - 2026-07-31
 
 - Adicionada busca ampliada e filtros por conta, categoria, intervalo, valor, direção, tipo técnico, origem e pendência.

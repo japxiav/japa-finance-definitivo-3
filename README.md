@@ -1,4 +1,4 @@
-# Japa Finance v0.9 Alpha 4 — Histórico e explicabilidade
+# Japa Finance v0.9 Alpha 5 — Saldo, contas e decisões
 
 Web app financeiro pessoal orientado a decisões. Ele não serve apenas para dizer quanto entrou e saiu. A proposta é responder, com dados verificáveis:
 
@@ -7,8 +7,32 @@ Web app financeiro pessoal orientado a decisões. Ele não serve apenas para diz
 - **O que mudou no meu comportamento financeiro?**
 - **Quais movimentações ainda precisam da minha ajuda?**
 
-A versão 0.8 adiciona uma camada de análise local e determinística sobre o motor financeiro existente. Não há dependência de IA ou API paga para gerar os insights.
+A Alpha 5 mantém a análise local e determinística sobre o motor financeiro existente. Não há dependência de IA ou API paga para calcular saldo, previsão ou descobertas.
 
+
+
+## Saldo, contas e decisões v0.9 Alpha 5
+
+A Alpha 5 transforma o histórico em posição financeira operacional sem esconder a qualidade dos dados:
+
+- card de saldo atual com estado **confirmado**, **estimado**, **desatualizado** ou **incompleto**;
+- posição consolidada por moeda, com Revolut, Wise e cada conta preservadas separadamente;
+- ponte auditável entre saldo reconciliado, fluxo externo, movimentos internos, conversões, taxas e ajustes;
+- dinheiro realmente livre após compromissos futuros e reserva mínima;
+- limite diário seguro até a próxima receita;
+- shell estático de PWA no iPhone: cabeçalho e barra inferior fixos, conteúdo central rolável e safe areas;
+- nova área **Planejar**, separada da Home;
+- detecção de pares entre contas próprias, com confirmação humana antes de excluir do fluxo;
+- filtros por instituição e conta, sem apagar a origem Wise/Revolut;
+- painel de moedas, taxas explícitas, volume convertido e câmbio efetivo quando as duas pontas estão vinculadas;
+- detalhamento de transferências por finalidade, categoria, pessoa, recorrência e observação;
+- divisão de uma transferência em vários itens, cuja soma precisa fechar exatamente com o fato bancário;
+- assinaturas compartilhadas e outros itens recorrentes podem virar compromissos futuros;
+- Descobertas separadas em **Agora**, **Oportunidades** e **Padrões**, com impacto e ação quando os dados sustentam a conclusão;
+- painel de integridade que informa desde quando há histórico, saldo incompleto, pendências, conversões sem par e transferências internas sugeridas;
+- proteção global contra falha de renderização, mutações de categoria protegidas e botões com tipo explícito para evitar envios acidentais de formulários.
+
+O estado passa para `schemaVersion: 9`. Backups schema 8 são migrados automaticamente, inicializando os novos detalhamentos e decisões sem alterar os fatos bancários existentes.
 
 
 ## Histórico e explicabilidade v0.9 Alpha 4
@@ -156,7 +180,7 @@ O motor de insights não altera saldos, previsões, reservas ou movimentações.
 
 ## Persistência e migração
 
-- a v0.8 introduziu `schemaVersion: 5`; a Alpha 1 usou a versão 6, a Alpha 2 a versão 7 e a Alpha 3 migra o estado para `schemaVersion: 8`;
+- a v0.8 introduziu `schemaVersion: 5`; a Alpha 1 usou a versão 6, a Alpha 2 a versão 7 e a Alpha 3 migrou o estado para `schemaVersion: 8` e a Alpha 5 usa `schemaVersion: 9`;
 - migração automática dos estados v2, v3 e v4;
 - categorias antigas `clothing` e `games` são remapeadas para `shopping`;
 - contas e categorias personalizadas existentes são preservadas;
