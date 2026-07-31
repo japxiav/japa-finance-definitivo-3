@@ -319,6 +319,7 @@ function FinanceApp({ session }: { session: Session }) {
   const conflictLock = useRef(false);
   const latestState = useRef<AppState | null>(null);
   const activeInstance = useRef(true);
+  const categoryMutationLock = useRef(new Set<string>());
 
   useEffect(() => () => {
     activeInstance.current = false;
@@ -699,8 +700,6 @@ function FinanceApp({ session }: { session: Session }) {
       : `Anular ${impact.transactionCount} transações deste lote? Nada será apagado.`;
     if (window.confirm(message)) setState(withRebuiltReviewGroups(undoImport(financeState, importId)));
   }
-
-  const categoryMutationLock = useRef(new Set<string>());
 
   function updateCategory(transaction: Transaction, rawCategoryId: string) {
     if (categoryMutationLock.current.has(transaction.id)) return;
