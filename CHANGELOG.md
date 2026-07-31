@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.0-alpha.4 - 2026-07-31
+
+- Adicionada busca ampliada e filtros por conta, categoria, intervalo, valor, direção, tipo técnico, origem e pendência.
+- Adicionada exportação CSV do conjunto exatamente visível após os filtros.
+- Filtros numéricos e intervalos inválidos agora são explicados e bloqueiam exportações/regras até a correção.
+- Criadas regras de classificação em massa com prévia, escopo opcional, preservação de escolhas manuais e desfazer pelo histórico.
+- Adicionada comparação entre período atual e anterior equivalente, incluindo entradas, despesas líquidas e resultado do fluxo.
+- Criadas explicações determinísticas das variações, com destaque para a categoria de maior impacto.
+- Comparações sem variação passam a ser apresentadas como estáveis, sem falso sinal positivo.
+- Adicionada linha do tempo de importações, reconciliações, classificações, movimentações manuais e planejamentos.
+- Mantido `schemaVersion: 8`; nenhuma migração de dados foi necessária.
+- Cache do service worker atualizado para a nova entrega.
+- Validação feita por typecheck direto, transpilação estática e smoke tests determinísticos, sem npm, Vitest, Vite, Supabase ou E2E.
+
+## 0.9.0-alpha.3 - 2026-07-31
+
+- Corrigido o filtro “Todos”: a lista e os indicadores agora usam o mesmo intervalo completo do extrato, em vez de a lista mostrar tudo e as métricas silenciosamente usarem apenas 30 dias.
+- O cartão principal passou a se chamar “Resultado do fluxo”, exibe o intervalo exato e deixa explícito que fluxo não é saldo bancário.
+- O parser Revolut reconhece `Comissão`/`Commission` e materializa taxas adicionais como movimentações separadas `bank_fee`, inclusive quando a operação principal é uma conversão excluída da análise; formatos cujo valor já é líquido não duplicam a taxa.
+- Movimentações bancárias `REVERTIDA`/estornadas recebem status `reverted`, movimento líquido zero e não contaminam despesas, saldo ou revisão.
+- A prévia de importação reconcilia livros separados por moeda e produto bancário, impedindo a mistura entre `Atual` e `Poupanças`.
+- Pendências antigas fora do intervalo deixam de tornar o fluxo atual “provisório”; continuam visíveis como revisão histórica separada.
+- A interface traduz o agrupamento analítico `uncategorized` para “Sem categoria” e exibe transações revertidas com valor riscado e sem edição financeira.
+- Estado migrado para `schemaVersion: 8`, preservando backups v7 e criando fatos de taxa de forma determinística.
+- Cache do service worker atualizado para evitar a permanência da interface anterior no iPhone.
+- Validação feita por transpilação estática, typecheck direto do núcleo e smoke tests determinísticos, sem npm, Vitest, Vite, Supabase ou E2E.
+
 ## 0.9.0-alpha.2 - 2026-07-30
 
 - Corrigida a exclusão indevida de transferências externas nos cálculos: recebidas contam como entrada e enviadas contam como saída.
