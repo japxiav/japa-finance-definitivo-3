@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 import { AuthScreen } from './auth/AuthScreen';
 import { UpdatePassword } from './auth/UpdatePassword';
-import { previewBankCsv, type Preview } from './core/csv';
+import { previewSmartBankCsv, type Preview } from './core/csv';
 import { financialDecisionFacade, type AssistantResult } from './application/FinancialDecisionFacade';
 import { createReconciliationSnapshotBatch } from './application/reconciliation';
 import { previewRevolutPdf } from './core/pdf';
@@ -61,10 +61,15 @@ import { PlannedEventModal } from './components/PlannedEventModal';
 import { CategoryManagerModal } from './components/CategoryManagerModal';
 import { ReviewGroupsPanel } from './components/ReviewGroupsPanel';
 import { BulkRuleModal, type BulkRuleInput } from './components/BulkRuleModal';
+import { IdentityProfileModal } from './components/IdentityProfileModal';
+import { TransferRecurrencePanel } from './components/TransferRecurrencePanel';
 import { createConfirmedBatch, getUndoImpact, restoreImport, undoImport } from './core/imports';
 import { formatMoney, parseSignedMoneyToCents } from './core/money';
 import { normalizeMerchant } from './core/merchant';
 import { buildActivityTimeline } from './application/activityTimeline';
+import { applyOwnerIdentityContext } from './application/ownerIdentity';
+import { applyPurposeToRecurrence, findTransferRecurrenceSuggestions, type TransferRecurrenceSuggestion } from './application/transferRecurrence';
+import { downloadContextDiagnostic } from './application/contextDiagnostic';
 import { confirmInternalTransferSuggestion, findInternalTransferSuggestions, rejectInternalTransferSuggestion, type InternalTransferSuggestion } from './application/internalTransfers';
 import { downloadTransactionsCsv, filterTransactions } from './application/transactionFilters';
 import {
@@ -96,6 +101,8 @@ import type {
   ReviewReason,
   Transaction,
   TechnicalMovementType,
+  TransferPurpose,
+  OwnerIdentityProfile,
 } from './core/types';
 import { initialState } from './data/defaults';
 import { applyCategoryDecision, deferReviewGroup, reopenReviewGroup, undoLatestReviewDecision } from './classification/decisions';
@@ -288,6 +295,7 @@ function FinanceApp({ session }: { session: Session }) {
   const [conflictBusy, setConflictBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [identityOpen, setIdentityOpen] = useState(false);
   const [reconciliationOpen, setReconciliationOpen] = useState(false);
   const [reserveOpen, setReserveOpen] = useState(false);
   const [plannedEventOpen, setPlannedEventOpen] = useState(false);
@@ -584,6 +592,7 @@ function FinanceApp({ session }: { session: Session }) {
   const freeMoneyPosition = buildFreeMoneyPosition(financeState, currencyPosition, today);
   const currencyAnalytics = buildCurrencyAnalytics(financeState, currency);
   const internalTransferSuggestions = findInternalTransferSuggestions(financeState, currency);
+  const transferRecurrenceSuggestions = findTransferRecurrenceSuggestions(financeState, currency);
   const impactInsights = buildImpactInsights({
     state: financeState,
     currency,
@@ -657,7 +666,7 @@ function FinanceApp({ session }: { session: Session }) {
     try {
       setPreview(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
         ? await previewRevolutPdf(file, financeState, importAccountId)
-        : await previewBankCsv(await file.text(), file.name, financeState, importAccountId));
+        : await previewSmartBankCsv(await file.text(), file.name, financeState, importAccountId));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Não foi possível ler o extrato.');
     } finally {
@@ -676,12 +685,27 @@ function FinanceApp({ session }: { session: Session }) {
       ? { ...item, status: 'accepted' as const, resolvedAt: new Date().toISOString() }
       : item);
     const batch = createConfirmedBatch(preview.batch, transactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary').length);
-    setState((current) => current && withRebuiltReviewGroups({
-      ...current,
-      transactions: [...transactions, ...current.transactions],
-      imports: [batch, ...current.imports],
-      importIssues: [...issues, ...current.importIssues],
-    }));
+    setState((current) => {
+      if (!current) return current;
+      const destinationIds = new Set(preview.accounts?.map((account) => account.id) ?? [preview.account.id]);
+      const existingIds = new Set(current.accounts.map((account) => account.id));
+      const accounts = [
+        ...current.accounts.map((account) => destinationIds.has(account.id) ? { ...account, active: true } : account),
+        ...(preview.createdAccounts ?? []).filter((account) => !existingIds.has(account.id)).map((account) => ({ ...account, active: true })),
+      ];
+      const ownAccountIds = [...new Set([
+        ...current.ownerIdentity.ownAccountIds,
+        ...accounts.filter((account) => destinationIds.has(account.id)).map((account) => account.id),
+      ])];
+      return withRebuiltReviewGroups({
+        ...current,
+        accounts,
+        ownerIdentity: { ...current.ownerIdentity, ownAccountIds, updatedAt: new Date().toISOString() },
+        transactions: [...transactions, ...current.transactions],
+        imports: [batch, ...current.imports],
+        importIssues: [...issues, ...current.importIssues],
+      });
+    });
     setPreview(null);
   }
 
@@ -1045,6 +1069,23 @@ function FinanceApp({ session }: { session: Session }) {
   function rejectInternalSuggestion(suggestion: InternalTransferSuggestion) {
     createCheckpoint(userId, financeState, `Antes de rejeitar sugestão de transferência interna`);
     setState(rejectInternalTransferSuggestion(financeState, suggestion));
+  }
+
+  function applyRecurrencePurpose(suggestion: TransferRecurrenceSuggestion, input: {
+    label: string;
+    purpose?: TransferPurpose;
+    categoryId?: string;
+    relatedPerson?: string;
+  }) {
+    createCheckpoint(userId, financeState, `Antes de detalhar grupo recorrente ${suggestion.recipientLabel}`);
+    setState(applyPurposeToRecurrence(financeState, suggestion, input));
+  }
+
+  function saveIdentityProfile(profile: OwnerIdentityProfile) {
+    createCheckpoint(userId, financeState, 'Antes de atualizar identidade própria');
+    const transactions = financeState.transactions.map((transaction) => applyOwnerIdentityContext(transaction, profile));
+    setState(withRebuiltReviewGroups({ ...financeState, ownerIdentity: profile, transactions }));
+    setIdentityOpen(false);
   }
 
   function saveTransferDetail(result: TransferDetailResult) {
@@ -1514,13 +1555,14 @@ function FinanceApp({ session }: { session: Session }) {
 
         <section className="panel integrity-panel"><div className="panel-title"><div><small>INTEGRIDADE VISÍVEL</small><h2>Quanto o aplicativo realmente sabe</h2></div><ShieldCheck size={20} /></div><div className="integrity-grid"><span><small>Saldo</small><b>{balanceConfidenceLabel}</b></span><span><small>Histórico disponível</small><b>{currencyHistoryStart && currencyHistoryEnd ? `${formatReportingDate(currencyHistoryStart)} a ${formatReportingDate(currencyHistoryEnd)}` : 'sem dados'}</b></span><span><small>Pendências críticas</small><b>{criticalPendingCount}</b></span><span><small>Pares internos sugeridos</small><b>{internalTransferSuggestions.length}</b></span><span><small>Conversões sem par</small><b>{unpairedConversionCount}</b></span><span><small>Detalhamentos</small><b>{financeState.transactionAllocations.filter((allocation) => financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)).length}</b></span></div></section>
 
-        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name} · {institutionName(account.institution)}</option>)}</select><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise ou PDF Revolut digital. Instituição, conta, moeda e origem permanecem separadas após a importação.</small></div>
-        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
-        <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
+        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name} · {institutionName(account.institution)}</option>)}</select><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise é detectado e separado automaticamente por instituição e moeda. A conta escolhida serve apenas como preferência para PDF ou arquivo sem moeda explícita.</small></div>
+        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{(batch.accountIds?.length ?? 1) > 1 ? `${batch.accountIds!.length} contas` : accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
         <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
       </section>}
 
-      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
+      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 && transferRecurrenceSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
+        <TransferRecurrencePanel suggestions={transferRecurrenceSuggestions} categories={financeState.categories} apply={applyRecurrencePurpose} />
         <ReviewGroupsPanel groups={currencyReviewGroups} transactions={visibleTransactions} categories={financeState.categories} apply={applyReviewGroup} resolveWithoutCategory={resolveReviewGroupWithoutCategory} defer={postponeReviewGroup} reopen={reactivateReviewGroup} applyOne={applyReviewException} />
         {eventsNeedingAccountReview.length > 0 && <section className="panel issues"><h3>Eventos sem conta</h3><p>Escolha a conta para reativá-los no forecast.</p>{eventsNeedingAccountReview.map((item) => <article key={item.id}><b>{item.title}</b><p>{item.dueDate} · {formatMoney(item.amountCents, item.currency)}</p><label>Conta<select aria-label={`Conta para ${item.title}`} defaultValue="" onChange={(event) => event.target.value && resolvePlannedEventAccount(item.id, event.target.value)}><option value="">Selecionar conta</option>{activeAccounts.filter((account) => account.currency === item.currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label></article>)}</section>}
         {unresolvedIssues.length > 0 && <section className="panel issues"><h3>Pendências de importação</h3>{unresolvedIssues.map((item) => <article key={item.id}><b>{item.kind.replaceAll('_', ' ')}</b><p>{item.message}</p><small>{accountName(item.accountId)}{item.rowNumber ? ` · linha ${item.rowNumber}` : ''}</small><button type="button" onClick={() => dismissIssue(item)}>Marcar como revisada</button></article>)}</section>}
@@ -1535,6 +1577,7 @@ function FinanceApp({ session }: { session: Session }) {
       {preview && <ImportPreview preview={preview} includePossibleDuplicates={includePossibleDuplicates} setIncludePossibleDuplicates={setIncludePossibleDuplicates} allowPartial={allowPartial} setAllowPartial={setAllowPartial} close={() => setPreview(null)} confirm={confirmImport} />}
       {manualOpen && <ManualModal accounts={activeAccounts} categories={financeState.categories} close={() => setManualOpen(false)} add={(transaction) => { createCheckpoint(userId, financeState, 'Antes de transação manual'); setState(withRebuiltReviewGroups({ ...financeState, transactions: [transaction, ...financeState.transactions] })); setManualOpen(false); }} />}
       {accountOpen && <AccountModal accounts={financeState.accounts} close={() => setAccountOpen(false)} activate={(accountId) => { createCheckpoint(userId, financeState, `Antes de ativar conta ${accountName(accountId)}`); setState({ ...financeState, accounts: financeState.accounts.map((account) => account.id === accountId ? { ...account, active: true } : account) }); }} save={(account) => { setState({ ...financeState, accounts: [...financeState.accounts, account] }); setAccountOpen(false); }} />}
+      {identityOpen && <IdentityProfileModal profile={financeState.ownerIdentity} accounts={financeState.accounts} close={() => setIdentityOpen(false)} save={saveIdentityProfile} />}
       {reconciliationOpen && <ReconciliationModal accounts={activeAccounts.filter((account) => account.currency === currency)} currency={currency} close={() => setReconciliationOpen(false)} confirm={confirmReconciliation} />}
       {reserveOpen && <ReserveModal currency={currency} policy={reservePolicy} close={() => setReserveOpen(false)} save={(policy) => { setState({ ...financeState, reservePolicies: [...financeState.reservePolicies.filter((item) => item.currency !== currency), policy] }); setReserveOpen(false); }} />}
       {plannedEventOpen && <PlannedEventModal accounts={activeAccounts} currency={currency} close={() => setPlannedEventOpen(false)} save={(plannedEvent) => { setState({ ...financeState, plannedEvents: [...financeState.plannedEvents, plannedEvent] }); setPlannedEventOpen(false); }} />}
@@ -1677,8 +1720,9 @@ function ImportPreview({ preview, includePossibleDuplicates, setIncludePossibleD
   const withoutCategory = preview.newTransactions.filter((item) => item.categoryReviewStatus === 'pending').length;
   const internalTransfers = preview.newTransactions.filter((item) => item.technicalType === 'internal_transfer' || item.technicalType === 'currency_conversion').length;
   const refunds = preview.newTransactions.filter((item) => item.technicalType === 'refund').length;
-  return <div className="modal-bg"><section className="modal wide-modal"><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">PRÉVIA SEGURA</span><h2>{preview.batch.fileName}</h2><p>Destino: <b>{preview.account.name}</b>. Nenhuma linha é gravada antes da confirmação.</p>
+  return <div className="modal-bg"><section className="modal wide-modal"><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">PRÉVIA SEGURA</span><h2>{preview.batch.fileName}</h2><p>{preview.destinations && preview.destinations.length > 1 ? 'O arquivo será separado automaticamente por conta e moeda.' : <>Destino: <b>{preview.account.name}</b>.</>} Nenhuma linha é gravada antes da confirmação.</p>
     <div className="preview-explainer"><b>O que o app entendeu</b><p>Transferências internas e conversões ficam fora do fluxo. Transferências externas contam pela direção, e reembolsos reduzem as saídas. O que continuar ambíguo será perguntado depois, sem sumir discretamente num porão contábil.</p></div>
+    {preview.destinations && <div className="preview-destinations">{preview.destinations.map((destination) => <article key={destination.account.id}><div><b>{destination.account.name}</b><small>{destination.account.institution === 'wise' ? 'Wise' : 'Revolut'} · {destination.currency}{destination.created ? ' · nova conta' : ''}</small></div><strong>{destination.transactionCount} movimentações</strong></article>)}</div>}
     <div className="preview-smart-grid"><div><b>{technicallyIdentified}</b><small>tipos identificados</small></div><div><b>{internalTransfers}</b><small>internas ou conversões</small></div><div><b>{refunds}</b><small>reembolsos</small></div><div><b>{withoutCategory}</b><small>para revisar em grupos</small></div></div>
     <div className="preview-grid"><div><b>{preview.newTransactions.length}</b><small>novas</small></div><div><b>{preview.confirmedDuplicateIds.length}</b><small>duplicatas certas</small></div><div><b>{preview.possibleDuplicates.length}</b><small>possíveis</small></div><div><b>{preview.issues.length}</b><small>pendências técnicas</small></div></div>
     {preview.currencies.map((item) => <div className={`reconciliation ${item.reconciliation}`} key={item.key}><b>{item.label}</b><span>Entradas {formatMoney(item.inflowCents, item.currency)}</span><span>Saídas {formatMoney(item.outflowCents, item.currency)}</span><span>{item.reconciliation === 'reconciled' ? 'Livro de saldo reconciliado' : item.reconciliation === 'mismatch' ? `Diferença ${formatMoney(item.reconciliationDifferenceCents ?? 0, item.currency)}` : 'Livro sem saldo suficiente para reconciliar'}</span></div>)}

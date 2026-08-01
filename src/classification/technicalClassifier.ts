@@ -21,7 +21,7 @@ export interface TechnicalClassification {
 
 export function isKnownCurrencyConversion(typeRaw: string, description: string): boolean {
   const value = searchable(typeRaw, description);
-  return /\b(exchange|exchanged|conversion|converted|fx|câmbio|cambio|conversão|conversao)\b/.test(value);
+  return /\b(exchange|exchanged|conversion|converted|convertid[oa]s?|fx|câmbio|cambio|conversão|conversao)\b/.test(value);
 }
 
 export function isKnownInternalTransfer(typeRaw: string, description: string): boolean {
@@ -82,7 +82,10 @@ export function identifyTechnicalMovement(input: {
     technicalType = 'currency_conversion';
   } else if (isKnownInternalTransfer(input.bankType ?? '', input.description)) {
     technicalType = 'internal_transfer';
-  } else if (/refund|reverted|reversal|cashback|chargeback|reembolso|estorno|reversão|reversao|devolução do cartão|devolucao do cartao/.test(value)
+  } else if (/(?:refund|reverted|reversal|cashback|chargeback|reembolso|estorno|reversão|reversao|devolução do cartão|devolucao do cartao)/.test(value)
+    && input.direction === 'inflow') {
+    technicalType = 'refund';
+  } else if (/(?:card transaction|card payment|transação por cartão|transacao por cartao|pagamento com cartão|pagamento com cartao)/.test(value)
     && input.direction === 'inflow') {
     technicalType = 'refund';
   } else if (/salary|payroll|wages|salário|salario|ordenado/.test(value) && input.direction === 'inflow') {
@@ -93,9 +96,9 @@ export function identifyTechnicalMovement(input: {
     technicalType = 'direct_debit';
   } else if (/fee|commission|taxa|comissão|comissao/.test(value) && input.direction === 'outflow') {
     technicalType = 'bank_fee';
-  } else if (/card payment|cash payment|pagamento com cartão|pagamento com cartao/.test(value) && input.direction === 'outflow') {
+  } else if (/card payment|card transaction|cash payment|pagamento com cartão|pagamento com cartao|transação por cartão|transacao por cartao/.test(value) && input.direction === 'outflow') {
     technicalType = 'card_payment';
-  } else if (/bank transfer|card to card transfer|international transfer|scheduled transfer|transferência|transferencia|\btransfer\b|pix/.test(value)) {
+  } else if (/bank transfer|card to card transfer|international transfer|scheduled transfer|transferência|transferencia|\btransfer\b|enviado para|recebido de|sent to|received from|pix/.test(value)) {
     technicalType = input.direction === 'inflow' ? 'incoming_transfer' : 'outgoing_transfer';
   } else if (/cash deposit|depósito em dinheiro|deposito em dinheiro|interest|juros/.test(value) && input.direction === 'inflow') {
     technicalType = 'other_income';

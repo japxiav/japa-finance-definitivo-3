@@ -4,7 +4,9 @@ import { civilDateFromUtcInstant, civilDaysBetween, isCivilDate } from '../domai
 import { localCivilDateFromInstant } from './date';
 import { isTransactionKindDirectionCompatible, signedNetMovement } from './finance';
 import { buildReviewGroups } from '../classification/grouping';
-import { normalizeMerchant } from './merchant';
+import { isCategoryCompatible } from '../classification/categoryCompatibility';
+import { applyOwnerIdentityContext } from '../application/ownerIdentity';
+import { extractMerchantIdentity, matchRule, normalizeMerchant } from './merchant';
 import { parseMoneyToCents } from './money';
 import { stableHash } from './hash';
 import {
@@ -391,6 +393,91 @@ function migrateV8(candidate: Record<string, unknown>): Record<string, unknown> 
   };
 }
 
+function migrateV9(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const identity = fallback.ownerIdentity;
+  const categories = Array.isArray(candidate.categories) ? candidate.categories as AppState['categories'] : fallback.categories;
+  const rules = Array.isArray(candidate.rules) ? candidate.rules as AppState['rules'] : fallback.rules;
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const transactions = oldTransactions.map((transaction) => {
+    const manuallyTyped = transaction.kindSource === 'manual'
+      || transaction.manualEditLog?.some((edit) => edit.field === 'technicalType');
+    const identified = identifyTechnicalMovement({
+      bankType: transaction.bankType,
+      description: transaction.descriptionOriginal,
+      direction: transaction.direction,
+    });
+    const technicalType = !manuallyTyped && transaction.technicalType === 'unknown' && identified.technicalType !== 'unknown'
+      ? identified.technicalType
+      : transaction.technicalType;
+    const kind = technicalType !== transaction.technicalType ? kindForTechnicalType(technicalType) : transaction.kind;
+    const analysisExcluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
+    let next: Transaction = {
+      ...transaction,
+      merchantNormalized: extractMerchantIdentity(transaction.descriptionOriginal),
+      technicalType,
+      kind,
+      kindSource: technicalType !== transaction.technicalType ? 'bank' : transaction.kindSource,
+      analysisExcluded,
+      transferGroupId: analysisExcluded
+        ? (transaction.transferGroupId ?? `migrated-context:${transaction.semanticFingerprint ?? transaction.id}`)
+        : transaction.transferGroupId,
+    };
+
+    if (!next.categoryId && next.status === 'completed' && isCategoryReviewApplicable(next.technicalType)) {
+      const rule = matchRule(next.descriptionOriginal, rules, {
+        currency: next.currency,
+        direction: next.direction,
+        kind: next.kind,
+        technicalType: next.technicalType,
+      });
+      const category = rule ? categories.find((item) => item.id === rule.categoryId) : undefined;
+      if (rule && category && isCategoryCompatible(category, next)) {
+        next = {
+          ...next,
+          categoryId: category.id,
+          categorySource: 'rule',
+          categoryReviewStatus: 'resolved',
+        };
+      }
+    }
+
+    const reviewReasons = [...new Set(next.reviewReasons ?? [])]
+      .filter((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer' && reason !== 'unlinked_refund');
+    if (next.technicalType === 'unknown') {
+      if (!reviewReasons.includes('unknown_kind')) reviewReasons.push('unknown_kind');
+    } else {
+      const index = reviewReasons.indexOf('unknown_kind');
+      if (index >= 0) reviewReasons.splice(index, 1);
+    }
+    if (analysisExcluded) {
+      next = {
+        ...next,
+        categoryId: undefined,
+        categorySource: 'none',
+        categoryReviewStatus: 'not_applicable',
+      };
+    } else if (next.categoryId) {
+      next = { ...next, categoryReviewStatus: 'resolved' };
+    } else if (next.categoryReviewStatus !== 'deferred' && isCategoryReviewApplicable(next.technicalType)) {
+      next = { ...next, categoryReviewStatus: 'pending' };
+    }
+    next = { ...next, reviewReasons, needsReview: reviewReasons.length > 0 };
+    return applyOwnerIdentityContext(next, identity);
+  });
+
+  return {
+    ...(candidate as object),
+    schemaVersion: 10,
+    ownerIdentity: identity,
+    transactions,
+    reviewGroups: [],
+    imports: (Array.isArray(candidate.imports) ? candidate.imports as AppState['imports'] : []).map((batch) => ({
+      ...batch,
+      accountIds: batch.accountIds ?? [batch.accountId],
+    })),
+  };
+}
+
 export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
   const candidate = raw as Record<string, unknown>;
@@ -423,7 +510,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 8) {
     return normalizeState(migrateV8(candidate), fallback);
   }
-  if (candidate.schemaVersion !== 9) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 9) {
+    return normalizeState(migrateV9(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion !== 10) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
@@ -432,6 +522,7 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   candidate.reviewDecisions ??= [];
   candidate.transactionAllocations ??= [];
   candidate.internalTransferDecisions ??= [];
+  candidate.ownerIdentity ??= fallback.ownerIdentity;
   const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions'];
   for (const key of requiredArrays) {
     if (!Array.isArray(candidate[key])) throw new Error(`Backup inválido: ${key} não é uma lista`);
@@ -498,6 +589,17 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (!oneOf(account.institution, ['revolut', 'wise', 'cash', 'other'] as const)) throw new Error('Backup contém instituição de conta inválida');
   }
   const accountById = new Map(state.accounts.map((account) => [account.id, account]));
+
+  if (!state.ownerIdentity || typeof state.ownerIdentity !== 'object') throw new Error('Backup não contém perfil de identidade válido');
+  if (!nonEmpty(state.ownerIdentity.displayName)) throw new Error('Backup contém nome próprio inválido');
+  for (const field of ['aliases', 'emails', 'ibans', 'ownAccountIds'] as const) {
+    const values = state.ownerIdentity[field];
+    if (!Array.isArray(values) || values.some((value) => !nonEmpty(value))) throw new Error(`Backup contém ${field} inválidos`);
+    state.ownerIdentity[field] = [...new Set(values.map((value) => value.trim()))];
+  }
+  if (state.ownerIdentity.ownAccountIds.some((id) => !accountById.has(id))) throw new Error('Backup contém conta própria inexistente');
+  if (!validTimestamp(state.ownerIdentity.updatedAt)) throw new Error('Backup contém atualização de identidade inválida');
+  state.ownerIdentity.updatedAt = canonicalTimestamp(state.ownerIdentity.updatedAt)!;
 
   const categoryIds = new Set<string>();
   for (const category of state.categories) {
@@ -642,6 +744,15 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (transaction.feeTreatment !== undefined && !oneOf(transaction.feeTreatment, ['INCLUDED_IN_REPORTED_AMOUNT', 'ADDITIONAL_TO_REPORTED_AMOUNT'] as const)) {
       throw new Error('Backup contém tratamento de taxa inválido');
     }
+    if (transaction.contextConfidence !== undefined && !oneOf(transaction.contextConfidence, ['high', 'medium', 'low'] as const)) {
+      throw new Error('Backup contém confiança de contexto inválida');
+    }
+    if (transaction.contextEvidence !== undefined && (!Array.isArray(transaction.contextEvidence) || transaction.contextEvidence.some((item) => !nonEmpty(item)))) {
+      throw new Error('Backup contém evidência de contexto inválida');
+    }
+    if (transaction.ownerIdentityMatched !== undefined && typeof transaction.ownerIdentityMatched !== 'boolean') {
+      throw new Error('Backup contém correspondência de identidade inválida');
+    }
     const allowedReviewReasons = new Set([
       'uncategorized', 'unknown_kind', 'possible_duplicate', 'zero_amount',
       'unverified_fee', 'ambiguous_transfer', 'unlinked_refund',
@@ -738,6 +849,11 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     importIds.add(batch.id);
     const account = accountById.get(batch.accountId);
     if (!account) throw new Error('Backup contém importação ligada a conta inexistente');
+    batch.accountIds ??= [batch.accountId];
+    if (!Array.isArray(batch.accountIds) || batch.accountIds.length === 0 || batch.accountIds.some((id) => !nonEmpty(id) || !accountById.has(id))) {
+      throw new Error('Backup contém destinos de importação inválidos');
+    }
+    batch.accountIds = [...new Set(batch.accountIds)];
     if (!nonEmpty(batch.fileName) || !nonEmpty(batch.fileHash) || !nonEmpty(batch.parserVersion)) {
       throw new Error('Backup contém metadados de importação inválidos');
     }
@@ -753,8 +869,9 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     if (!Array.isArray(batch.currencies) || batch.currencies.some((currency) => !nonEmpty(currency)) || new Set(batch.currencies).size !== batch.currencies.length) {
       throw new Error('Backup contém moedas de importação inválidas');
     }
-    if (batch.currencies.some((currency) => currency !== account.currency)) {
-      throw new Error('Backup contém importação em moeda incompatível com a conta');
+    const destinationCurrencies = new Set(batch.accountIds.map((id) => accountById.get(id)!.currency));
+    if (batch.currencies.some((currency) => !destinationCurrencies.has(currency))) {
+      throw new Error('Backup contém importação em moeda sem conta de destino');
     }
     if ((batch.firstReportingDate === undefined) !== (batch.lastReportingDate === undefined)) {
       throw new Error('Backup contém intervalo parcial de importação');

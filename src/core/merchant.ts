@@ -15,6 +15,27 @@ export function normalizeMerchant(value: string): string {
     .replace(/\s+/g, ' ');
 }
 
+
+/**
+ * Extrai uma identidade de comerciante/contraparte de descrições bancárias
+ * verbosas. Valores e frases do banco mudam a cada linha; o nome econômico
+ * costuma permanecer.
+ */
+export function extractMerchantIdentity(value: string): string {
+  const stripped = value
+    .replace(/^(?:transa[cç][aã]o|pagamento)\s+por\s+cart[aã]o\s+de\s+-?[\d.,]+\s+[A-Z]{3,6}\s+(?:emitida|emitido)\s+por\s+/i, '')
+    .replace(/^card\s+(?:transaction|payment)\s+(?:of\s+)?-?[\d.,]+\s+[A-Z]{3,6}\s+(?:issued\s+by|at)\s+/i, '')
+    .replace(/^(?:bank\s+)?transfer(?:red)?\s+(?:to|from)\s+/i, '')
+    .replace(/^transfer[eê]ncia\s+(?:para|de)\s+/i, '')
+    .replace(/^(?:enviado|enviada)\s+para\s+/i, '')
+    .replace(/^(?:recebido|recebida)\s+de\s+/i, '')
+    .replace(/-?[\d.,]+\s+(?:EUR|BRL|GBP|USD|CHF|JPY|CAD|AUD)\b/gi, ' ')
+    .replace(/\b(?:emitida|emitido|issued)\s+(?:por|by)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normalizeMerchant(stripped || value);
+}
+
 export interface RuleMatchContext {
   currency?: CurrencyCode;
   direction?: Direction;

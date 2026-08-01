@@ -114,6 +114,10 @@ export interface Transaction {
   voidReason?: 'import_undone' | 'manual';
   createdAt: string;
   updatedAt: string;
+  /** Evidências determinísticas de contexto; nunca substituem correção manual. */
+  contextConfidence?: SuggestionConfidence;
+  contextEvidence?: string[];
+  ownerIdentityMatched?: boolean;
 }
 
 export type ImportStatus = 'active' | 'undone';
@@ -121,6 +125,8 @@ export type ImportStatus = 'active' | 'undone';
 export interface ImportBatch {
   id: string;
   accountId: string;
+  /** Importações multi-moeda podem alcançar mais de uma conta. */
+  accountIds?: string[];
   fileName: string;
   fileHash: string;
   parserName: ParserName;
@@ -384,6 +390,16 @@ export interface PlannedEvent {
   updatedAt: string;
 }
 
+
+export interface OwnerIdentityProfile {
+  displayName: string;
+  aliases: string[];
+  emails: string[];
+  ibans: string[];
+  ownAccountIds: string[];
+  updatedAt: string;
+}
+
 export interface SyncMetadata {
   remoteRevision: number;
   remoteUpdatedAt: string;
@@ -391,7 +407,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 9;
+  schemaVersion: 10;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];
@@ -408,4 +424,5 @@ export interface AppState {
   reviewDecisions: ReviewDecision[];
   transactionAllocations: TransactionAllocation[];
   internalTransferDecisions: InternalTransferDecision[];
+  ownerIdentity: OwnerIdentityProfile;
 }

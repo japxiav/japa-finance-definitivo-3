@@ -21,12 +21,13 @@ export function buildActivityTimeline(
   const items: ActivityItem[] = [];
 
   for (const batch of state.imports) {
-    if (!accountIds.has(batch.accountId)) continue;
+    const batchAccounts = batch.accountIds ?? [batch.accountId];
+    if (!batchAccounts.some((id) => accountIds.has(id))) continue;
     items.push({
       id: `import-${batch.id}`,
       kind: 'import',
       title: batch.status === 'undone' ? 'Importação anulada' : 'Extrato importado',
-      detail: `${batch.fileName} · ${accountName(batch.accountId)} · ${batch.imported} movimentações`,
+      detail: `${batch.fileName} · ${batchAccounts.length > 1 ? `${batchAccounts.length} contas` : accountName(batch.accountId)} · ${batch.imported} movimentações`,
       occurredAt: batch.createdAt,
       undone: batch.status === 'undone',
     });

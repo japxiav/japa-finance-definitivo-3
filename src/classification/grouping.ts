@@ -1,4 +1,4 @@
-import { matchRule, normalizeMerchant } from '../core/merchant';
+import { extractMerchantIdentity, matchRule, normalizeMerchant } from '../core/merchant';
 import { isCategoryCompatible } from './categoryCompatibility';
 import { isCategoryReviewApplicable } from './technicalClassifier';
 import type {
@@ -13,7 +13,7 @@ import type {
 const NO_MERCHANT = 'movimentacao sem comerciante';
 
 export function reviewGroupKey(transaction: Pick<Transaction, 'merchantNormalized' | 'descriptionOriginal' | 'currency' | 'direction' | 'kind' | 'technicalType'>): string {
-  const merchant = transaction.merchantNormalized || normalizeMerchant(transaction.descriptionOriginal) || NO_MERCHANT;
+  const merchant = transaction.merchantNormalized || extractMerchantIdentity(transaction.descriptionOriginal) || NO_MERCHANT;
   return [transaction.currency, transaction.direction, transaction.kind, transaction.technicalType, merchant].join('|');
 }
 
@@ -140,7 +140,7 @@ export function buildReviewGroups(
     return {
       id: existing?.id ?? crypto.randomUUID(),
       key,
-      merchantNormalized: first.merchantNormalized || normalizeMerchant(first.descriptionOriginal) || NO_MERCHANT,
+      merchantNormalized: first.merchantNormalized || extractMerchantIdentity(first.descriptionOriginal) || NO_MERCHANT,
       merchantLabel: first.descriptionOriginal,
       currency: first.currency,
       direction: first.direction,

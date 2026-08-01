@@ -1,10 +1,11 @@
 import { addCents, subtractCents } from '../domain/arithmetic';
 import { parseBankDate } from './date';
 import { sha256Hex, stableHash } from './hash';
-import { matchRule, normalizeMerchant } from './merchant';
+import { extractMerchantIdentity, matchRule, normalizeMerchant } from './merchant';
 import { identifyTechnicalMovement, isCategoryReviewApplicable } from '../classification/technicalClassifier';
 import { isCategoryCompatible } from '../classification/categoryCompatibility';
 import { parseMoneyToCents, parseSignedMoneyToCents } from './money';
+import { applyOwnerIdentityContext } from '../application/ownerIdentity';
 import type {
   Account,
   AppState,
@@ -35,9 +36,19 @@ export interface CurrencyPreview {
   reconciliation: 'reconciled' | 'mismatch' | 'unavailable';
 }
 
+export interface ImportDestinationPreview {
+  account: Account;
+  transactionCount: number;
+  currency: string;
+  created: boolean;
+}
+
 export interface Preview {
   batch: ImportBatch;
   account: Account;
+  accounts?: Account[];
+  createdAccounts?: Account[];
+  destinations?: ImportDestinationPreview[];
   newTransactions: Transaction[];
   possibleDuplicates: PossibleDuplicate[];
   confirmedDuplicateIds: string[];
@@ -143,6 +154,82 @@ function hasAnyHeader(headers: string[], names: string[]): boolean {
 function parserNameFor(account: Account): ParserName {
   if (account.institution === 'wise') return 'wise_csv';
   return 'revolut_csv';
+}
+
+function detectParserName(headers: string[], preferred?: Account, fileName = ''): ParserName {
+  const wiseSignals = [
+    'TransferWise ID', 'Source amount', 'Target amount', 'Source currency', 'Target currency',
+    'Valor de origem', 'Valor de destino', 'Moeda de origem', 'Moeda de destino', 'Recipient', 'Beneficiário',
+  ];
+  const revolutSignals = ['Completed Date', 'Started Date', 'Product', 'State', 'Data de conclusão', 'Data de início', 'Produto', 'Estado'];
+  if (/\b(?:wise|transferwise)\b/i.test(fileName)) return 'wise_csv';
+  if (/\brevolut\b/i.test(fileName)) return 'revolut_csv';
+  const wiseScore = wiseSignals.filter((name) => hasAnyHeader(headers, [name])).length;
+  const revolutScore = revolutSignals.filter((name) => hasAnyHeader(headers, [name])).length;
+  if (wiseScore > revolutScore) return 'wise_csv';
+  if (revolutScore > wiseScore) return 'revolut_csv';
+  const genericWise = hasAnyHeader(headers, ['Date', 'Data'])
+    && hasAnyHeader(headers, ['Amount', 'Valor'])
+    && hasAnyHeader(headers, ['Currency', 'Moeda'])
+    && hasAnyHeader(headers, ['Status', 'ID'])
+    && !hasAnyHeader(headers, ['Product', 'Produto', 'Started Date', 'Completed Date', 'Data de início', 'Data de conclusão']);
+  if (genericWise) return 'wise_csv';
+  return preferred ? parserNameFor(preferred) : 'wise_csv';
+}
+
+function deterministicAccountId(institution: Account['institution'], currency: string): string {
+  return `${institution}-${currency.toLocaleLowerCase('en-IE').replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+export interface BankCsvInspection {
+  parserName: ParserName;
+  institution: 'wise' | 'revolut';
+  currencies: string[];
+  rowsRead: number;
+  accounts: Account[];
+  createdAccounts: Account[];
+}
+
+export function inspectBankCsv(
+  text: string,
+  state: AppState,
+  preferredAccountId?: string,
+  fileName = '',
+): BankCsvInspection {
+  const document = parseCsvDocument(text);
+  const preferred = preferredAccountId ? state.accounts.find((item) => item.id === preferredAccountId) : undefined;
+  const parserName = detectParserName(document.headers, preferred, fileName);
+  validateKnownFormat(document.headers, parserName);
+  const institution = parserName === 'wise_csv' ? 'wise' : 'revolut';
+  const currencies = new Set<string>();
+  for (const row of document.rows) {
+    for (const raw of [
+      get(row, ['Currency', 'Amount currency', 'Moeda', 'Moeda do valor']),
+      get(row, ['Source currency', 'SourceCurrency', 'Moeda de origem']),
+      get(row, ['Target currency', 'TargetCurrency', 'Moeda de destino']),
+    ]) {
+      const currency = raw.trim().toUpperCase();
+      if (/^[A-Z]{3,6}$/.test(currency)) currencies.add(currency);
+    }
+  }
+  if (!currencies.size && preferred?.currency) currencies.add(preferred.currency);
+  if (!currencies.size) throw new Error('Não foi possível detectar a moeda do extrato.');
+
+  const createdAccounts: Account[] = [];
+  const accounts = [...currencies].sort().map((currency) => {
+    const existing = state.accounts.find((account) => account.institution === institution && account.currency === currency);
+    if (existing) return existing;
+    const account: Account = {
+      id: deterministicAccountId(institution, currency),
+      name: `${institution === 'wise' ? 'Wise' : 'Revolut'} ${currency}`,
+      currency,
+      institution,
+      active: true,
+    };
+    createdAccounts.push(account);
+    return account;
+  });
+  return { parserName, institution, currencies: [...currencies].sort(), rowsRead: document.rows.length, accounts, createdAccounts };
 }
 
 function validateKnownFormat(headers: string[], parserName: ParserName) {
@@ -400,7 +487,6 @@ export async function previewBankCsv(
       const reviewReasons: ReviewReason[] = [];
       if (transactionStatus === 'completed') {
         if (technicalType === 'unknown') addReason(reviewReasons, 'unknown_kind');
-        if (kind === 'refund') addReason(reviewReasons, 'unlinked_refund');
         if (amountCents === 0) addReason(reviewReasons, 'zero_amount');
       }
 
@@ -463,7 +549,7 @@ export async function previewBankCsv(
         kindSource: kind === 'unknown' ? 'unknown' : 'bank',
         analysisExcluded: technical.analysisExcluded,
         descriptionOriginal: description,
-        merchantNormalized: normalizeMerchant(description),
+        merchantNormalized: extractMerchantIdentity(description),
         bankType: bankType || undefined,
         bankProduct: bankProduct || undefined,
         bankState: bankState || undefined,
@@ -538,6 +624,10 @@ export async function previewBankCsv(
     }
   });
 
+  for (let index = 0; index < parsedTransactions.length; index += 1) {
+    parsedTransactions[index] = applyOwnerIdentityContext(parsedTransactions[index]!, state.ownerIdentity);
+  }
+
   const existingBankIds = new Map(
     state.transactions
       .filter((transaction) => transaction.bankTransactionId)
@@ -610,6 +700,7 @@ export async function previewBankCsv(
   const batch: ImportBatch = {
     id: importId,
     accountId,
+    accountIds: [accountId],
     fileName,
     fileHash,
     parserName,
@@ -628,6 +719,87 @@ export async function previewBankCsv(
   };
 
   return { batch, account, newTransactions, possibleDuplicates, confirmedDuplicateIds, issues, currencies, blockingIssueCount };
+}
+
+export async function previewSmartBankCsv(
+  text: string,
+  fileName: string,
+  state: AppState,
+  preferredAccountId?: string,
+): Promise<Preview> {
+  const inspection = inspectBankCsv(text, state, preferredAccountId, fileName);
+  const temporaryState: AppState = {
+    ...state,
+    accounts: [
+      ...state.accounts.map((account) => inspection.accounts.some((item) => item.id === account.id) ? { ...account, active: true } : account),
+      ...inspection.createdAccounts,
+    ],
+  };
+  const previews: Preview[] = [];
+  for (const account of inspection.accounts) {
+    previews.push(await previewBankCsv(text, fileName, temporaryState, account.id));
+  }
+
+  const masterImportId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const remapTransaction = (transaction: Transaction): Transaction => ({ ...transaction, importId: masterImportId });
+  const newTransactions = previews.flatMap((preview) => preview.newTransactions.map(remapTransaction));
+  const possibleDuplicates = previews.flatMap((preview) => preview.possibleDuplicates.map((item) => ({
+    ...item,
+    transaction: remapTransaction(item.transaction),
+  })));
+  const ignoredCrossCurrencyMessage = /não pode entrar na conta|não encontrei um valor em [A-Z]{3,6} nesta linha da Wise/i;
+  const issues = previews.flatMap((preview) => preview.issues)
+    .filter((item) => item.kind !== 'currency_mismatch' && !ignoredCrossCurrencyMessage.test(item.message))
+    .map((item) => ({ ...item, importId: masterImportId }));
+  const issueKeys = new Set<string>();
+  const uniqueIssues = issues.filter((item) => {
+    const key = `${item.accountId}|${item.rowNumber ?? ''}|${item.kind}|${item.message}`;
+    if (issueKeys.has(key)) return false;
+    issueKeys.add(key);
+    return true;
+  });
+  const currencies = previews.flatMap((preview) => preview.currencies);
+  const uniqueCurrencyPreviews = [...new Map(currencies.map((item) => [item.key, item])).values()];
+  const primaryTransactions = newTransactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary');
+  const reportingDates = primaryTransactions.map((transaction) => transaction.reportingDate).sort();
+  const batch: ImportBatch = {
+    ...previews[0]!.batch,
+    id: masterImportId,
+    accountId: inspection.accounts[0]!.id,
+    accountIds: inspection.accounts.map((account) => account.id),
+    parserName: inspection.parserName,
+    createdAt,
+    rowsRead: inspection.rowsRead,
+    imported: primaryTransactions.length,
+    confirmedDuplicates: new Set(previews.flatMap((preview) => preview.confirmedDuplicateIds)).size,
+    possibleDuplicates: new Set(possibleDuplicates.map((item) => item.transaction.sourceRowNumber).filter(Boolean)).size,
+    pendingRows: uniqueIssues.filter((item) => item.kind === 'pending').length,
+    rejected: uniqueIssues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch').length,
+    currencies: inspection.currencies,
+    firstReportingDate: reportingDates[0],
+    lastReportingDate: reportingDates.at(-1),
+  };
+  const destinations = inspection.accounts.map((account) => ({
+    account,
+    currency: account.currency,
+    created: inspection.createdAccounts.some((item) => item.id === account.id),
+    transactionCount: primaryTransactions.filter((transaction) => transaction.accountId === account.id).length,
+  }));
+  const blockingIssueCount = uniqueIssues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch' || item.kind === 'format_change').length;
+  return {
+    batch,
+    account: inspection.accounts[0]!,
+    accounts: inspection.accounts,
+    createdAccounts: inspection.createdAccounts,
+    destinations,
+    newTransactions,
+    possibleDuplicates,
+    confirmedDuplicateIds: [...new Set(previews.flatMap((preview) => preview.confirmedDuplicateIds))],
+    issues: uniqueIssues,
+    currencies: uniqueCurrencyPreviews,
+    blockingIssueCount,
+  };
 }
 
 /** Compatibilidade com a API antiga. */
