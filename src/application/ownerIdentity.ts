@@ -31,8 +31,8 @@ export function matchOwnerIdentity(
 
   const aliases = [...new Set([profile.displayName, ...profile.aliases].map(normalize).filter((value) => value.length >= 3))];
   const directionalPrefix = input.direction === 'outflow'
-    ? '(?:sent to|send to|transfer to|transferred to|enviado para|enviada para|transferencia para|transferido para|pago a)'
-    : '(?:received from|receive from|transfer from|transferred from|recebido de|recebida de|transferencia de|transferido de)';
+    ? '(?:sent to|send to|transfer to|transferred to|enviado para|enviada para|enviou dinheiro para|transferencia para|transferido para|pago a)'
+    : '(?:received from|receive from|transfer from|transferred from|recebido de|recebida de|recebeu dinheiro de|transferencia de|transferido de)';
 
   for (const alias of aliases) {
     const pattern = new RegExp(`\\b${directionalPrefix}\\s+${escaped(alias)}\\b`, 'i');

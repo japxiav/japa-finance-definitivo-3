@@ -1,4 +1,4 @@
-import type { Account, PlannedEvent } from '../core/types';
+import type { Account, AppState, PlannedEvent } from '../core/types';
 import { isCivilDate, isInstantTimestamp } from '../domain/dates';
 
 export function createPlannedEventForAccount(input: {
@@ -36,5 +36,20 @@ export function createPlannedEventForAccount(input: {
     active: true,
     createdAt: input.now,
     updatedAt: input.now,
+  };
+}
+
+
+export function deactivatePlannedEvent(state: AppState, eventId: string, now = new Date().toISOString()): AppState {
+  const event = state.plannedEvents.find((item) => item.id === eventId);
+  if (!event) return state;
+  return {
+    ...state,
+    plannedEvents: state.plannedEvents.map((item) => item.id === eventId
+      ? { ...item, active: false, needsAccountReview: false, updatedAt: now }
+      : item),
+    transactionAllocations: state.transactionAllocations.map((allocation) => allocation.plannedEventId === eventId
+      ? { ...allocation, plannedEventId: undefined, updatedAt: now }
+      : allocation),
   };
 }

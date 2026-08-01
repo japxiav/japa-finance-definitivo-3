@@ -407,7 +407,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 10;
+  schemaVersion: 11;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];

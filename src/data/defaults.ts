@@ -1,7 +1,7 @@
 import type { AppState } from '../core/types';
 
 export const initialState: AppState = {
-  schemaVersion: 10,
+  schemaVersion: 11,
   accounts: [
     { id: 'revolut-eur', name: 'Revolut EUR', currency: 'EUR', institution: 'revolut', active: true },
     { id: 'revolut-brl', name: 'Revolut BRL', currency: 'BRL', institution: 'revolut', active: false },

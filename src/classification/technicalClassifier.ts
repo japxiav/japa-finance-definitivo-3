@@ -98,7 +98,7 @@ export function identifyTechnicalMovement(input: {
     technicalType = 'bank_fee';
   } else if (/card payment|card transaction|cash payment|pagamento com cartão|pagamento com cartao|transação por cartão|transacao por cartao/.test(value) && input.direction === 'outflow') {
     technicalType = 'card_payment';
-  } else if (/bank transfer|card to card transfer|international transfer|scheduled transfer|transferência|transferencia|\btransfer\b|enviado para|recebido de|sent to|received from|pix/.test(value)) {
+  } else if (/bank transfer|card to card transfer|international transfer|scheduled transfer|transferência|transferencia|\btransfer\b|enviado para|enviou dinheiro para|recebido de|recebeu dinheiro de|sent to|sent money to|received from|received money from|pix/.test(value)) {
     technicalType = input.direction === 'inflow' ? 'incoming_transfer' : 'outgoing_transfer';
   } else if (/cash deposit|depósito em dinheiro|deposito em dinheiro|interest|juros/.test(value) && input.direction === 'inflow') {
     technicalType = 'other_income';

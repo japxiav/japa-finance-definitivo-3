@@ -66,7 +66,17 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
     summary.transactionCount += 1;
     if (movement > 0) summary.inflowCents = addCents(summary.inflowCents, movement);
     if (movement < 0) summary.outflowCents = addCents(summary.outflowCents, Math.abs(movement));
-    if (transaction.technicalType === 'bank_fee') summary.feeCents = addCents(summary.feeCents, Math.abs(movement));
+    if (transaction.technicalType === 'bank_fee') {
+      summary.feeCents = addCents(summary.feeCents, Math.abs(movement));
+    } else if (transaction.sourceComponent !== 'fee'
+      && transaction.feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT'
+      && Number.isSafeInteger(transaction.feeCents)
+      && (transaction.feeCents ?? 0) > 0) {
+      // Wise já traz o movimento líquido. A taxa não vira outro lançamento
+      // para não ser descontada duas vezes, mas continua sendo um custo
+      // explícito que precisa aparecer na análise por instituição.
+      summary.feeCents = addCents(summary.feeCents, transaction.feeCents!);
+    }
     if (transaction.technicalType === 'currency_conversion' && transaction.sourceComponent !== 'fee') {
       summary.conversionCount += 1;
       if (movement < 0) summary.convertedOutflowCents = addCents(summary.convertedOutflowCents, Math.abs(movement));
@@ -88,9 +98,16 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
     const sourceAmountCents = Math.abs(signedNetMovement(source));
     const targetAmountCents = Math.abs(signedNetMovement(target));
     const feeParentIds = new Set(group.map((transaction) => transaction.id));
-    const explicitFeeCents = state.transactions
+    const separateFeeCents = state.transactions
       .filter((transaction) => transaction.sourceComponent === 'fee' && transaction.feeOfTransactionId && feeParentIds.has(transaction.feeOfTransactionId))
       .reduce((total, transaction) => addCents(total, Math.abs(signedNetMovement(transaction))), 0);
+    const includedFeeCents = group
+      .filter((transaction) => transaction.sourceComponent !== 'fee'
+        && transaction.feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT'
+        && Number.isSafeInteger(transaction.feeCents)
+        && (transaction.feeCents ?? 0) > 0)
+      .reduce((total, transaction) => addCents(total, transaction.feeCents!), 0);
+    const explicitFeeCents = addCents(separateFeeCents, includedFeeCents);
     effectiveConversions.push({
       groupId,
       reportingDate: source.reportingDate,

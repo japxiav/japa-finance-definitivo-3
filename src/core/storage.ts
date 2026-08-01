@@ -1,4 +1,4 @@
-import type { AppState, Category, ImportIssue, InternalTransferDecision, ReviewDecision, ReviewGroup, SyncMetadata, TechnicalMovementType, Transaction, TransactionAllocation } from './types';
+import type { AppState, Category, ImportIssue, InternalTransferDecision, OwnerIdentityProfile, ReviewDecision, ReviewGroup, SyncMetadata, TechnicalMovementType, Transaction, TransactionAllocation } from './types';
 import { canAddCents } from '../domain/arithmetic';
 import { civilDateFromUtcInstant, civilDaysBetween, isCivilDate } from '../domain/dates';
 import { localCivilDateFromInstant } from './date';
@@ -478,6 +478,65 @@ function migrateV9(candidate: Record<string, unknown>, fallback: AppState): Reco
   };
 }
 
+function migrateV10(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const profile = (candidate.ownerIdentity && typeof candidate.ownerIdentity === 'object'
+    ? candidate.ownerIdentity
+    : fallback.ownerIdentity) as OwnerIdentityProfile;
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const transactions = oldTransactions.map((transaction) => {
+    const manuallyTyped = transaction.kindSource === 'manual'
+      || transaction.manualEditLog?.some((edit) => edit.field === 'technicalType');
+    const identified = identifyTechnicalMovement({
+      bankType: transaction.bankType,
+      description: transaction.descriptionOriginal,
+      direction: transaction.direction,
+    });
+    const canReclassify = !manuallyTyped && transaction.technicalType === 'unknown' && identified.technicalType !== 'unknown';
+    const technicalType = canReclassify ? identified.technicalType : transaction.technicalType;
+    const analysisExcluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
+    let next: Transaction = {
+      ...transaction,
+      merchantNormalized: extractMerchantIdentity(transaction.descriptionOriginal),
+      technicalType,
+      kind: canReclassify ? kindForTechnicalType(technicalType) : transaction.kind,
+      kindSource: canReclassify ? 'bank' : transaction.kindSource,
+      analysisExcluded,
+      transferGroupId: analysisExcluded
+        ? (transaction.transferGroupId ?? `migrated-context:${transaction.semanticFingerprint ?? transaction.id}`)
+        : transaction.transferGroupId,
+    };
+
+    const reviewReasons = [...new Set(next.reviewReasons ?? [])];
+    if (technicalType === 'unknown') {
+      if (!reviewReasons.includes('unknown_kind')) reviewReasons.push('unknown_kind');
+    } else {
+      const unknownIndex = reviewReasons.indexOf('unknown_kind');
+      if (unknownIndex >= 0) reviewReasons.splice(unknownIndex, 1);
+    }
+    if (analysisExcluded) {
+      next = {
+        ...next,
+        categoryId: undefined,
+        categorySource: 'none',
+        categoryReviewStatus: 'not_applicable',
+      };
+    } else if (next.categoryId) {
+      next = { ...next, categoryReviewStatus: 'resolved' };
+    } else if (next.categoryReviewStatus !== 'deferred' && isCategoryReviewApplicable(technicalType)) {
+      next = { ...next, categoryReviewStatus: 'pending' };
+    }
+    next = { ...next, reviewReasons, needsReview: reviewReasons.length > 0 };
+    return applyOwnerIdentityContext(next, profile);
+  });
+
+  return {
+    ...(candidate as object),
+    schemaVersion: 11,
+    transactions,
+    reviewGroups: [],
+  };
+}
+
 export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
   const candidate = raw as Record<string, unknown>;
@@ -513,7 +572,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 9) {
     return normalizeState(migrateV9(candidate, fallback), fallback);
   }
-  if (candidate.schemaVersion !== 10) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 10) {
+    return normalizeState(migrateV10(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion !== 11) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
