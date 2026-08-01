@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0-alpha.5.3 - 2026-07-31
+
+- Importação bancária passa a detectar Wise ou Revolut pelo arquivo, sem depender da conta escolhida anteriormente.
+- Arquivos com mais de uma moeda são separados automaticamente entre contas da mesma instituição, incluindo EUR e BRL, com criação ou ativação assistida das contas ausentes.
+- Prévia de importação mostra destinos por instituição, conta e moeda antes de gravar qualquer fato financeiro.
+- Classificador técnico reconhece descrições bancárias extensas em português, conversões, transferências enviadas/recebidas e reembolsos por cartão.
+- Agrupamento usa identidade normalizada do comerciante, reduzindo centenas de descrições verbosas a poucos grupos úteis de revisão.
+- Adicionado perfil de identidade própria com nome, aliases, e-mails, IBANs e contas do titular.
+- Transferências explicitamente enviadas para ou recebidas de uma identidade própria reconhecida podem ser excluídas do fluxo externo com evidência auditável; correções manuais continuam soberanas.
+- Adicionada detecção conservadora de grupos recorrentes de transferências por destinatário, faixa de valor e frequência, com finalidade opcional aplicada ao grupo e preservação de exceções.
+- Adicionado diagnóstico financeiro exportável com fatos, hipóteses, conflitos, lacunas, regras, recorrências e sugestões de vínculos internos.
+- Estado migrado para `schemaVersion: 10`; backups schema 8 e 9 continuam migrando automaticamente.
+- Cabeçalho e área rolável receberam ajustes para impedir sobreposição do seletor de moeda e avatar no iPhone.
+- Nenhuma migration SQL do Supabase foi alterada; o novo contexto permanece dentro do snapshot JSONB existente.
+- Validação feita por compilação TypeScript direta, verificação semântica estática e smoke tests determinísticos, sem npm, Vitest, Vite, Supabase ou E2E.
+
 ## 0.9.0-alpha.5 - 2026-07-31
 
 - Adicionado saldo atual por conta e consolidado por moeda, com estado confirmado, estimado, desatualizado ou incompleto.
