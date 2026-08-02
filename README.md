@@ -1,4 +1,41 @@
-# Japa Finance v0.9 Alpha 5 — Saldo, contas e decisões
+# Japa Finance v0.9 Alpha 6 — Fidelidade bancária, contexto e auditoria
+
+A Alpha 6 reorganiza o aplicativo para que o extrato seja a fonte dos fatos e toda interpretação fique numa camada auditável. O objetivo não é apenas classificar lançamentos, mas responder de onde cada número veio, o que ainda é incerto e quais correções podem ser aplicadas sem alterar decisões manuais.
+
+## Fundamentos da Alpha 6
+
+- livros bancários separados por instituição, moeda e produto, incluindo Revolut Atual, Revolut Poupanças, Wise Conta principal e movimentos de Rende+;
+- ciclo de vida completo das movimentações: pendente, concluída, revertida e enriquecida por reimportação;
+- importação idempotente que atualiza fatos bancários existentes sem duplicá-los e sem apagar classificação manual;
+- reconhecimento determinístico de `Wise Charges for:` e movimentos para/de Rende+;
+- eventos compostos que ligam conversão, taxa e pontas relacionadas sem apagar as linhas originais;
+- cartão **Hoje** separado em fluxo externo concluído, pendentes, transferências internas, conversões e taxas, com acesso às linhas que formaram cada total;
+- distinção explícita entre saldo zero, não informado, estimado e confirmado por posição de extrato;
+- revisão dividida em correções obrigatórias, vínculos, contexto e organização opcional;
+- descrições humanas na interface com preservação integral da descrição bancária original;
+- gerenciamento de contas com renomear, arquivar, reativar, excluir conta vazia e mesclar com prévia;
+- Memória Financeira para pessoas, comerciantes e papéis válidos por período;
+- Saúde da Base com verificações concretas, sem esconder erro grave atrás de uma porcentagem bonita;
+- Auditoria por IA opcional: a IA propõe ações estruturadas e o motor determinístico valida, confirma, aplica e permite desfazer;
+- pesquisa externa opcional limitada a empresas, comerciantes, instituições e documentação pública. Pessoas particulares nunca são pesquisadas.
+
+O estado passa para `schemaVersion: 12`. Backups schema 11 são migrados automaticamente. Os dados continuam no snapshot JSONB existente, portanto esta entrega não exige uma migration SQL nova do Supabase.
+
+## OpenAI opcional
+
+A aplicação funciona sem IA. Para habilitar **Auditoria Inteligente**, configure no ambiente do servidor Vercel:
+
+```text
+OPENAI_API_KEY=...
+OPENAI_FINANCIAL_MODEL=gpt-5.6-luna
+SUPABASE_URL=...
+SUPABASE_PUBLISHABLE_KEY=...
+```
+
+A chave da OpenAI nunca deve usar prefixo `VITE_`, porque variáveis `VITE_*` são expostas ao navegador. O frontend envia um panorama estruturado para `/api/financial-audit`; a rota verifica a sessão Supabase e chama a Responses API no servidor. A pesquisa web só é habilitada quando o usuário marca explicitamente a opção correspondente.
+
+A API não recebe o CSV bruto por padrão e não altera valores, datas, moedas ou saldos. Ela devolve propostas com evidências. O aplicativo faz a prévia e exige confirmação antes de qualquer alteração.
+
 
 Web app financeiro pessoal orientado a decisões. Ele não serve apenas para dizer quanto entrou e saiu. A proposta é responder, com dados verificáveis:
 

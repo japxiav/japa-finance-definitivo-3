@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, type FocusEvent, type FormEvent } from 'react';
 import { Archive, RotateCcw, Trash2, X } from 'lucide-react';
 import type { Category, CategoryRule, CategoryType } from '../core/types';
 
@@ -60,7 +60,7 @@ export function CategoryManagerModal({
           <div className="category-main">
             <span className="category-dot" />
             <div>
-              {canEdit ? <input aria-label={`Nome de ${category.name}`} defaultValue={category.name} onBlur={(event) => event.target.value.trim() && event.target.value.trim() !== category.name && rename(category.id, event.target.value.trim())} /> : <b>{category.name}</b>}
+              {canEdit ? <input aria-label={`Nome de ${category.name}`} defaultValue={category.name} onBlur={(event: FocusEvent<HTMLInputElement>) => event.target.value.trim() && event.target.value.trim() !== category.name && rename(category.id, event.target.value.trim())} /> : <b>{category.name}</b>}
               <small>{count} {count === 1 ? 'movimentação' : 'movimentações'} · {category.type === 'income' ? 'receita' : category.type === 'both' ? 'receita e despesa' : category.type === 'system' ? 'sistema' : 'despesa'}</small>
             </div>
           </div>

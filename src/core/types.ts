@@ -35,13 +35,24 @@ export type ReviewReason =
   | 'ambiguous_transfer'
   | 'unlinked_refund';
 
+export type AccountSource = 'default' | 'import' | 'manual';
+
 export interface Account {
   id: string;
   name: string;
   currency: CurrencyCode;
   institution: Institution;
+  /** Produto bancário independente, por exemplo Atual, Poupanças ou Rende+. */
+  product?: string;
+  /** Identificador bancário quando o extrato o fornece. */
+  externalId?: string;
+  source?: AccountSource;
   active: boolean;
+  archivedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
+
 
 export interface ManualEdit {
   field: string;
@@ -73,7 +84,11 @@ export interface Transaction {
   sourceComponent?: 'primary' | 'fee';
   feeOfTransactionId?: string;
   semanticFingerprint?: string;
+  /** Chave estável do mesmo fato bancário ao longo de pendente, concluído e revertido. */
+  lifecycleFingerprint?: string;
   balanceAfterCents?: number;
+  /** Impacto conhecido no saldo disponível; não altera o saldo contabilizado. */
+  availableImpactCents?: number;
   currency: CurrencyCode;
   direction: Direction;
 
@@ -118,7 +133,16 @@ export interface Transaction {
   contextConfidence?: SuggestionConfidence;
   contextEvidence?: string[];
   ownerIdentityMatched?: boolean;
+  /** Título legível derivado sem apagar a descrição bruta do banco. */
+  friendlyDescription?: string;
+  /** Entidade da memória financeira associada à contraparte. */
+  counterpartyEntityId?: string;
+  /** Evento composto que reúne linhas do mesmo acontecimento. */
+  compoundEventId?: string;
+  /** Última vez em que os campos bancários foram enriquecidos por reimportação. */
+  bankUpdatedAt?: string;
 }
+
 
 export type ImportStatus = 'active' | 'undone';
 
@@ -135,6 +159,8 @@ export interface ImportBatch {
   status: ImportStatus;
   rowsRead: number;
   imported: number;
+  /** Movimentações existentes enriquecidas ou com estado atualizado. */
+  updated?: number;
   confirmedDuplicates: number;
   possibleDuplicates: number;
   pendingRows: number;
@@ -400,6 +426,89 @@ export interface OwnerIdentityProfile {
   updatedAt: string;
 }
 
+
+export type FinancialEntityType = 'person' | 'merchant' | 'employer' | 'institution' | 'service';
+export type FinancialEntityRelationship =
+  | 'self'
+  | 'family'
+  | 'friend'
+  | 'employer'
+  | 'merchant'
+  | 'service'
+  | 'unknown';
+
+/** Conhecimento confirmado pelo usuário. Não altera fatos bancários. */
+export interface FinancialMemoryEntity {
+  id: string;
+  displayName: string;
+  normalizedAliases: string[];
+  type: FinancialEntityType;
+  relationship: FinancialEntityRelationship;
+  contextLabel?: string;
+  categoryId?: string;
+  technicalType?: TechnicalMovementType;
+  direction?: Direction;
+  /** Contexto pode valer apenas em um intervalo, como salário intermediado. */
+  validFrom?: string;
+  validUntil?: string;
+  notes?: string;
+  source: 'manual' | 'confirmed_suggestion' | 'system';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  normalizedName: string;
+  displayName: string;
+  entityType: 'merchant' | 'institution' | 'service';
+  categoryId?: string;
+  summary?: string;
+  source: 'local' | 'web' | 'manual';
+  sourceUrl?: string;
+  confidence: SuggestionConfidence;
+  researchedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AuditIssueSeverity = 'critical' | 'warning' | 'info';
+export type AuditProposalType =
+  | 'reclassify_technical'
+  | 'link_internal_transfer'
+  | 'link_compound_event'
+  | 'set_category'
+  | 'create_memory_entity'
+  | 'merge_accounts'
+  | 'archive_account'
+  | 'review_only';
+
+export interface AuditProposal {
+  id: string;
+  type: AuditProposalType;
+  severity: AuditIssueSeverity;
+  title: string;
+  explanation: string;
+  evidence: string[];
+  transactionIds: string[];
+  accountIds: string[];
+  confidence: SuggestionConfidence;
+  payload: Record<string, unknown>;
+  status: 'pending' | 'applied' | 'dismissed';
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface AiAuditRun {
+  id: string;
+  createdAt: string;
+  model: string;
+  usedWebSearch: boolean;
+  summary: string;
+  proposalIds: string[];
+  inputFingerprint: string;
+}
+
 export interface SyncMetadata {
   remoteRevision: number;
   remoteUpdatedAt: string;
@@ -407,7 +516,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 11;
+  schemaVersion: 12;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];
@@ -425,4 +534,9 @@ export interface AppState {
   transactionAllocations: TransactionAllocation[];
   internalTransferDecisions: InternalTransferDecision[];
   ownerIdentity: OwnerIdentityProfile;
+  financialMemory: FinancialMemoryEntity[];
+  knowledgeBase: KnowledgeEntry[];
+  auditProposals: AuditProposal[];
+  aiAuditRuns: AiAuditRun[];
 }
+

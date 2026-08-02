@@ -11,6 +11,10 @@ export interface AccountPosition {
   account: Account;
   snapshotBalanceCents?: number;
   currentBalanceCents?: number;
+  /** Saldo contabilizado somado ao impacto das operações bancárias ainda pendentes. */
+  availableBalanceCents?: number;
+  pendingImpactCents: number;
+  pendingCount: number;
   logicalAsOf?: string;
   logicalDate?: string;
   latestMovementDate?: string;
@@ -36,6 +40,9 @@ export interface CurrencyPosition {
   knownAccountCount: number;
   missingAccountCount: number;
   currentBalanceCents?: number;
+  availableBalanceCents?: number;
+  pendingImpactCents: number;
+  pendingCount: number;
   confidence: BalanceConfidence;
   latestAsOf?: string;
   bridge?: BalanceBridge;
@@ -88,12 +95,20 @@ export function buildCurrencyPosition(state: AppState, currency: string, today: 
       .sort((a, b) => b.reportingDate.localeCompare(a.reportingDate)
         || (transactionInstant(b) ?? '').localeCompare(transactionInstant(a) ?? ''));
     const latestMovementDate = accountTransactions[0]?.reportingDate;
+    const pendingTransactions = state.transactions.filter((transaction) =>
+      transaction.accountId === account.id
+      && transaction.currency === currency
+      && transaction.status === 'pending');
+    const pendingImpactCents = pendingTransactions.reduce((total, transaction) =>
+      addCents(total, transaction.availableImpactCents ?? transaction.reportedAmountCents ?? signedNetMovement(transaction)), 0);
     if (!snapshot) {
       return {
         account,
         latestMovementDate,
         movementSinceSnapshotCents: 0,
         movementCountSinceSnapshot: 0,
+        pendingImpactCents,
+        pendingCount: pendingTransactions.length,
         confidence: 'missing',
       };
     }
@@ -106,6 +121,9 @@ export function buildCurrencyPosition(state: AppState, currency: string, today: 
       account,
       snapshotBalanceCents: snapshot.balanceCents,
       currentBalanceCents: addCents(snapshot.balanceCents, movementSinceSnapshotCents),
+      availableBalanceCents: addCents(addCents(snapshot.balanceCents, movementSinceSnapshotCents), pendingImpactCents),
+      pendingImpactCents,
+      pendingCount: pendingTransactions.length,
       logicalAsOf,
       logicalDate,
       latestMovementDate,
@@ -119,6 +137,11 @@ export function buildCurrencyPosition(state: AppState, currency: string, today: 
   const currentBalanceCents = known.length === positions.length && known.length > 0
     ? known.reduce((total, position) => addCents(total, position.currentBalanceCents!), 0)
     : undefined;
+  const availableBalanceCents = known.length === positions.length && known.length > 0
+    ? known.reduce((total, position) => addCents(total, position.availableBalanceCents ?? position.currentBalanceCents!), 0)
+    : undefined;
+  const pendingImpactCents = positions.reduce((total, position) => addCents(total, position.pendingImpactCents), 0);
+  const pendingCount = positions.reduce((total, position) => total + position.pendingCount, 0);
   const confidence: BalanceConfidence = positions.some((position) => position.confidence === 'missing')
     ? 'missing'
     : positions.some((position) => position.confidence === 'stale')
@@ -171,6 +194,9 @@ export function buildCurrencyPosition(state: AppState, currency: string, today: 
     knownAccountCount: known.length,
     missingAccountCount: positions.length - known.length,
     currentBalanceCents,
+    availableBalanceCents,
+    pendingImpactCents,
+    pendingCount,
     confidence,
     latestAsOf: positions.map((position) => position.logicalAsOf).filter(Boolean).sort().at(-1),
     bridge,

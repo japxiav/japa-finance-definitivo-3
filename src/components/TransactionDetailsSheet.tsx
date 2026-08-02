@@ -1,0 +1,11 @@
+import { X } from 'lucide-react';
+import type { Account, Category, Transaction } from '../core/types';
+import { formatMoney } from '../core/money';
+import { signedNetMovement } from '../core/finance';
+import { formatReportingDate } from '../core/date';
+import { technicalTypeLabel } from '../classification/technicalClassifier';
+
+export function TransactionDetailsSheet({ transaction, account, category, close }: { transaction: Transaction; account?: Account; category?: Category; close: () => void }) {
+  const movement = transaction.status === 'pending' ? (transaction.availableImpactCents ?? transaction.reportedAmountCents ?? 0) : signedNetMovement(transaction);
+  return <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><section className="transaction-sheet"><header><div><small>{transaction.status === 'pending' ? 'PENDENTE' : formatReportingDate(transaction.reportingDate)}</small><h2>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</h2></div><button type="button" className="icon-button" onClick={close}><X/></button></header><strong className={movement >= 0 ? 'positive' : 'negative'}>{movement < 0 ? '-' : '+'}{formatMoney(Math.abs(movement), transaction.currency)}</strong><dl><div><dt>Conta</dt><dd>{account?.name ?? transaction.accountId}</dd></div><div><dt>Tipo técnico</dt><dd>{technicalTypeLabel(transaction.technicalType)}</dd></div><div><dt>Categoria</dt><dd>{category?.name ?? 'Sem categoria'}</dd></div><div><dt>Estado bancário</dt><dd>{transaction.bankState ?? transaction.status}</dd></div><div><dt>ID bancário</dt><dd>{transaction.bankTransactionId ?? 'Não fornecido'}</dd></div>{transaction.compoundEventId && <div><dt>Evento composto</dt><dd>{transaction.compoundEventId}</dd></div>}</dl><details><summary>Descrição original do banco</summary><p>{transaction.descriptionOriginal}</p></details><details><summary>Dados originais</summary><pre>{JSON.stringify(transaction.originalData, null, 2)}</pre></details>{transaction.manualEditLog.length > 0 && <details><summary>Histórico manual</summary>{transaction.manualEditLog.map((edit, index) => <p key={`${edit.editedAt}-${index}`}>{edit.field}: {String(edit.oldValue)} → {String(edit.newValue)} · {new Date(edit.editedAt).toLocaleString('pt-BR')}</p>)}</details>}</section></div>;
+}

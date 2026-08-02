@@ -28,6 +28,7 @@ export function isKnownInternalTransfer(typeRaw: string, description: string): b
   const value = searchable(typeRaw, description);
   return /transfer between balances|transferência entre saldos|transferencia entre saldos/.test(value)
     || /carregamento de subconta|levantamento de subconta|subaccount top up|subaccount withdrawal/.test(value)
+    || /movimentados? (?:para|de) .*rende\+|moved (?:to|from) .*interest|wise.*rende\+/.test(value)
     || /^(?:carregamento|card top up|cash top up|top up by bank card)\b/.test(value);
 }
 
@@ -94,7 +95,7 @@ export function identifyTechnicalMovement(input: {
     technicalType = 'cash_withdrawal';
   } else if (/direct debit|débito direto|debito direto/.test(value) && input.direction === 'outflow') {
     technicalType = 'direct_debit';
-  } else if (/fee|commission|taxa|comissão|comissao/.test(value) && input.direction === 'outflow') {
+  } else if (/wise charges for|fee balance|\bfee\b|commission|taxa|comissão|comissao/.test(value) && input.direction === 'outflow') {
     technicalType = 'bank_fee';
   } else if (/card payment|card transaction|cash payment|pagamento com cartão|pagamento com cartao|transação por cartão|transacao por cartao/.test(value) && input.direction === 'outflow') {
     technicalType = 'card_payment';

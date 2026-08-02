@@ -38,6 +38,12 @@ export function undoImport(state: AppState, importId: string): AppState {
     imports: state.imports.map((batch) =>
       batch.id === importId ? { ...batch, status: 'undone' } : batch,
     ),
+    reconciliationBatches: state.reconciliationBatches.map((batch) => {
+      const belongsToImport = state.balanceSnapshots.some((snapshot) =>
+        snapshot.reconciliationBatchId === batch.id && snapshot.sourceImportId === importId,
+      );
+      return belongsToImport ? { ...batch, status: 'INVALIDATED' as const } : batch;
+    }),
   };
 }
 
@@ -59,6 +65,12 @@ export function restoreImport(state: AppState, importId: string): AppState {
     imports: state.imports.map((batch) =>
       batch.id === importId ? { ...batch, status: 'active' } : batch,
     ),
+    reconciliationBatches: state.reconciliationBatches.map((batch) => {
+      const belongsToImport = state.balanceSnapshots.some((snapshot) =>
+        snapshot.reconciliationBatchId === batch.id && snapshot.sourceImportId === importId,
+      );
+      return belongsToImport ? { ...batch, status: 'COMPLETE' as const } : batch;
+    }),
   };
 }
 

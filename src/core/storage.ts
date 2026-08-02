@@ -9,6 +9,9 @@ import { applyOwnerIdentityContext } from '../application/ownerIdentity';
 import { extractMerchantIdentity, matchRule, normalizeMerchant } from './merchant';
 import { parseMoneyToCents } from './money';
 import { stableHash } from './hash';
+import { accountBookId, accountBookName, normalizeProductName, sameAccountBook } from '../application/accountBooks';
+import { withFriendlyDescription } from '../application/transactionPresentation';
+import { linkCompoundEvents } from '../application/compoundEvents';
 import {
   identifyTechnicalMovement,
   isCategoryReviewApplicable,
@@ -537,6 +540,121 @@ function migrateV10(candidate: Record<string, unknown>, fallback: AppState): Rec
   };
 }
 
+function migrateV11(candidate: Record<string, unknown>, fallback: AppState): Record<string, unknown> {
+  const now = new Date().toISOString();
+  const oldAccounts = Array.isArray(candidate.accounts) ? candidate.accounts as AppState['accounts'] : [];
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const accounts: AppState['accounts'] = oldAccounts.map((account) => ({
+    ...account,
+    product: normalizeProductName(account.product || (account.institution === 'wise' ? 'Conta principal' : account.institution === 'revolut' ? 'Atual' : 'Conta principal')),
+    source: account.source ?? 'manual',
+  }));
+  const accountById = new Map(accounts.map((account) => [account.id, account]));
+  const destinationByLegacyProduct = new Map<string, string>();
+
+  for (const transaction of oldTransactions) {
+    const legacy = accountById.get(transaction.accountId);
+    if (!legacy || (legacy.institution !== 'wise' && legacy.institution !== 'revolut')) continue;
+    const product = normalizeProductName(transaction.bankProduct || legacy.product || (legacy.institution === 'wise' ? 'Conta principal' : 'Atual'));
+    const template = { ...legacy, product };
+    let destination = accounts.find((account) => sameAccountBook(account, template.institution, template.currency, template.product));
+    if (!destination) {
+      destination = {
+        id: accountBookId(legacy.institution, legacy.currency, product),
+        name: accountBookName(legacy.institution, legacy.currency, product),
+        currency: legacy.currency,
+        institution: legacy.institution,
+        product,
+        source: 'import',
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      accounts.push(destination);
+      accountById.set(destination.id, destination);
+    }
+    destinationByLegacyProduct.set(`${legacy.id}|${product}`, destination.id);
+  }
+
+  let transactions = oldTransactions.map((transaction) => {
+    const legacy = accountById.get(transaction.accountId);
+    const product = normalizeProductName(transaction.bankProduct || legacy?.product || (legacy?.institution === 'wise' ? 'Conta principal' : 'Atual'));
+    const destinationId = destinationByLegacyProduct.get(`${transaction.accountId}|${product}`) ?? transaction.accountId;
+    const manualTechnical = transaction.kindSource === 'manual' || transaction.manualEditLog?.some((edit) => edit.field === 'technicalType');
+    const found = identifyTechnicalMovement({
+      bankType: `${transaction.bankType ?? ''} ${transaction.originalData?.['Transaction Details Type'] ?? ''}`,
+      description: transaction.descriptionOriginal,
+      direction: transaction.direction,
+    });
+    const technicalType = !manualTechnical && (transaction.technicalType === 'unknown' || /wise charges for|rende\+/i.test(transaction.descriptionOriginal))
+      ? found.technicalType
+      : transaction.technicalType;
+    const kind = manualTechnical ? transaction.kind : kindForTechnicalType(technicalType);
+    const excluded = technicalType === 'internal_transfer' || technicalType === 'currency_conversion';
+    let reviewReasons = [...new Set(transaction.reviewReasons ?? [])].filter((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer');
+    if (technicalType === 'unknown' && !reviewReasons.includes('unknown_kind')) reviewReasons.push('unknown_kind');
+    if (technicalType !== 'unknown') reviewReasons = reviewReasons.filter((reason) => reason !== 'unknown_kind');
+    const next: Transaction = {
+      ...transaction,
+      accountId: destinationId,
+      bankProduct: product,
+      technicalType,
+      kind,
+      kindSource: manualTechnical ? transaction.kindSource : (technicalType === 'unknown' ? 'unknown' : 'bank'),
+      analysisExcluded: excluded,
+      transferGroupId: excluded ? (transaction.transferGroupId ?? `migrated-v12:${transaction.semanticFingerprint ?? transaction.id}`) : transaction.transferGroupId,
+      categoryId: excluded && transaction.categorySource !== 'manual' ? undefined : transaction.categoryId,
+      categorySource: excluded && transaction.categorySource !== 'manual' ? 'none' : transaction.categorySource,
+      categoryReviewStatus: excluded && transaction.categorySource !== 'manual' ? 'not_applicable' : transaction.categoryReviewStatus,
+      reviewReasons,
+      needsReview: reviewReasons.length > 0,
+      friendlyDescription: transaction.friendlyDescription,
+      lifecycleFingerprint: transaction.lifecycleFingerprint ?? stableHash(JSON.stringify([
+        destinationId, transaction.startedAt ?? transaction.reportingDate, transaction.amountCents,
+        transaction.direction, normalizeMerchant(transaction.descriptionOriginal), transaction.currency, product,
+        transaction.sourceComponent ?? 'primary',
+      ])),
+    };
+    return withFriendlyDescription(next);
+  });
+  transactions = linkCompoundEvents({ ...(candidate as object), schemaVersion: 12, accounts, transactions } as AppState).transactions;
+
+  const previousOwnerIdentity = (candidate.ownerIdentity ?? fallback.ownerIdentity) as OwnerIdentityProfile;
+  const ownerIdentity: OwnerIdentityProfile = {
+    ...previousOwnerIdentity,
+    aliases: [...previousOwnerIdentity.aliases],
+    emails: [...previousOwnerIdentity.emails],
+    ibans: [...previousOwnerIdentity.ibans],
+    ownAccountIds: [...previousOwnerIdentity.ownAccountIds],
+  };
+  ownerIdentity.ownAccountIds = [...new Set([
+    ...ownerIdentity.ownAccountIds.filter((id) => accounts.some((account) => account.id === id)),
+    ...transactions.filter((transaction) => ownerIdentity.ownAccountIds.includes(oldTransactions.find((old) => old.id === transaction.id)?.accountId ?? '')).map((transaction) => transaction.accountId),
+  ])];
+  ownerIdentity.updatedAt = now;
+
+  const imports = (Array.isArray(candidate.imports) ? candidate.imports as AppState['imports'] : []).map((batch) => {
+    const accountIds = [...new Set(transactions.filter((transaction) => transaction.importId === batch.id).map((transaction) => transaction.accountId))];
+    return { ...batch, accountId: accountIds[0] ?? batch.accountId, accountIds: accountIds.length ? accountIds : (batch.accountIds ?? [batch.accountId]), updated: batch.updated ?? 0 };
+  });
+
+  const state = {
+    ...(candidate as object),
+    schemaVersion: 12,
+    accounts,
+    transactions,
+    imports,
+    ownerIdentity,
+    financialMemory: [],
+    knowledgeBase: [],
+    auditProposals: [],
+    aiAuditRuns: [],
+    reviewGroups: [],
+  } as unknown as AppState;
+  state.reviewGroups = buildReviewGroups(state);
+  return state as unknown as Record<string, unknown>;
+}
+
 export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
   const candidate = raw as Record<string, unknown>;
@@ -575,7 +693,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 10) {
     return normalizeState(migrateV10(candidate, fallback), fallback);
   }
-  if (candidate.schemaVersion !== 11) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 11) {
+    return normalizeState(migrateV11(candidate, fallback), fallback);
+  }
+  if (candidate.schemaVersion !== 12) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
@@ -585,7 +706,11 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   candidate.transactionAllocations ??= [];
   candidate.internalTransferDecisions ??= [];
   candidate.ownerIdentity ??= fallback.ownerIdentity;
-  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions'];
+  candidate.financialMemory ??= [];
+  candidate.knowledgeBase ??= [];
+  candidate.auditProposals ??= [];
+  candidate.aiAuditRuns ??= [];
+  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions', 'financialMemory', 'knowledgeBase', 'auditProposals', 'aiAuditRuns'];
   for (const key of requiredArrays) {
     if (!Array.isArray(candidate[key])) throw new Error(`Backup inválido: ${key} não é uma lista`);
   }
@@ -649,6 +774,9 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     accountIds.add(account.id);
     if (typeof account.active !== 'boolean') throw new Error('Backup contém estado de conta inválido');
     if (!oneOf(account.institution, ['revolut', 'wise', 'cash', 'other'] as const)) throw new Error('Backup contém instituição de conta inválida');
+    if (account.product !== undefined && !nonEmpty(account.product)) throw new Error('Backup contém produto de conta inválido');
+    if (account.source !== undefined && !oneOf(account.source, ['default', 'import', 'manual'] as const)) throw new Error('Backup contém origem de conta inválida');
+    if (account.archivedAt !== undefined && !validTimestamp(account.archivedAt)) throw new Error('Backup contém arquivamento de conta inválido');
   }
   const accountById = new Map(state.accounts.map((account) => [account.id, account]));
 
@@ -734,6 +862,9 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
       throw new Error('Backup contém transação ligada a categoria inexistente');
     }
     if (!Number.isSafeInteger(transaction.amountCents) || transaction.amountCents < 0) throw new Error('Backup contém valor monetário inválido');
+    if (transaction.availableImpactCents !== undefined && !Number.isSafeInteger(transaction.availableImpactCents)) throw new Error('Backup contém impacto disponível inválido');
+    if (transaction.lifecycleFingerprint !== undefined && !nonEmpty(transaction.lifecycleFingerprint)) throw new Error('Backup contém identidade de ciclo inválida');
+    if (transaction.friendlyDescription !== undefined && !nonEmpty(transaction.friendlyDescription)) throw new Error('Backup contém descrição amigável inválida');
     if (!oneOf(transaction.direction, ['inflow', 'outflow'] as const)) throw new Error('Backup contém direção de transação inválida');
     if (!oneOf(transaction.kind, ['income', 'expense', 'transfer', 'refund', 'adjustment', 'unknown'] as const)) throw new Error('Backup contém natureza financeira inválida');
     if (!oneOf(transaction.technicalType, TECHNICAL_TYPES)) throw new Error('Backup contém tipo técnico de transação inválido');
@@ -924,7 +1055,8 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     }
     if (!validTimestamp(batch.createdAt)) throw new Error('Backup contém data de importação inválida');
     batch.createdAt = canonicalTimestamp(batch.createdAt)!;
-    const counters = [batch.rowsRead, batch.imported, batch.confirmedDuplicates, batch.possibleDuplicates, batch.pendingRows, batch.rejected];
+    batch.updated ??= 0;
+    const counters = [batch.rowsRead, batch.imported, batch.updated, batch.confirmedDuplicates, batch.possibleDuplicates, batch.pendingRows, batch.rejected];
     if (counters.some((value) => !Number.isSafeInteger(value) || value < 0 || value > batch.rowsRead)) {
       throw new Error('Backup contém contadores de importação inválidos');
     }
@@ -957,7 +1089,7 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
     issueIds.add(issue.id);
     const batch = state.imports.find((item) => item.id === issue.importId);
     const account = accountById.get(issue.accountId);
-    if (!batch || !account || batch.accountId !== issue.accountId) throw new Error('Backup contém pendência ligada a importação ou conta inválida');
+    if (!batch || !account || !(batch.accountIds ?? [batch.accountId]).includes(issue.accountId)) throw new Error('Backup contém pendência ligada a importação ou conta inválida');
     if (!oneOf(issue.kind, ['row_error', 'pending', 'possible_duplicate', 'currency_mismatch', 'format_change'] as const)
       || !oneOf(issue.status, ['unresolved', 'accepted', 'ignored'] as const)
       || !nonEmpty(issue.message)) {
@@ -1297,6 +1429,7 @@ export function createCheckpoint(userId: string, state: AppState, label: string)
 }
 
 export function exportState(state: AppState) {
+  try { localStorage.setItem('japa-finance-last-export-at', new Date().toISOString()); } catch { /* metadado opcional */ }
   const payload = { schemaVersion: state.schemaVersion, exportedAt: new Date().toISOString(), state };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const anchor = document.createElement('a');

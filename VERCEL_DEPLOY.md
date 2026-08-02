@@ -1,13 +1,34 @@
-# Vercel Deploy
+# Deploy da Alpha 6 no Vercel
 
-1. Importe este diretório como projeto Vite.
-2. Use Node 22, instalação `npm install --no-audit --no-fund`, build `npm run build` e saída `dist`.
-3. Configure em Production, Preview e Development conforme necessário:
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_PUBLISHABLE_KEY`
-   - `VITE_ALLOWED_EMAIL` (opcional)
-4. Faça redeploy após alterar variáveis.
-5. No Supabase Auth, inclua a URL publicada como Site URL/Redirect URL.
-6. Abra a URL e confirme login, refresh, segundo navegador e conflito explícito.
+## Variáveis do frontend
 
-O `vercel.json` contém fallback SPA e impede cache persistente de `sw.js`.
+```text
+VITE_SUPABASE_URL=https://seu-projeto.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+VITE_ALLOWED_EMAIL=opcional
+```
+
+## Variáveis do servidor para a Auditoria Inteligente
+
+```text
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+OPENAI_API_KEY=sk-...
+OPENAI_FINANCIAL_MODEL=gpt-5.6-luna
+```
+
+Nunca use `VITE_OPENAI_API_KEY`. O Vite incorpora variáveis com prefixo `VITE_` no bundle público.
+
+A rota `/api/financial-audit` valida o bearer token do usuário no Supabase antes de chamar a OpenAI. O app continua funcional quando a chave da OpenAI não está configurada; apenas a Auditoria Inteligente fica indisponível.
+
+## Banco de dados
+
+A Alpha 6 usa `schemaVersion: 12` dentro do estado JSONB já existente. Não há migration SQL nova nesta entrega.
+
+## Publicação
+
+1. Substitua os arquivos do repositório pela pasta da Alpha 6.
+2. Configure as variáveis acima no projeto Vercel.
+3. Faça o deploy.
+4. Abra o app uma vez online para que o service worker receba o cache `japa-finance-shell-alpha6`.
+5. Exporte um backup antes de importar novamente os extratos.

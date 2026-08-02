@@ -1,5 +1,29 @@
 # Changelog
 
+
+## 0.9.0-alpha.6 - 2026-08-02
+
+- Estado migrado para `schemaVersion: 12`, preservando backups schema 11 e separando livros por instituição, moeda e produto bancário.
+- O importador passa a armazenar operações pendentes e a enriquecer lançamentos existentes em reimportações, em vez de ignorar cegamente o mesmo identificador bancário.
+- Decisões manuais, notas e categorias sobrevivem a atualizações de status e a reprocessamentos técnicos.
+- `Wise Charges for:` e IDs `FEE-BALANCE-*` são reconhecidos como taxas; movimentos para/de Rende+ são tratados como internos.
+- Conversões, taxas e pontas relacionadas podem formar eventos compostos sem apagar os fatos bancários originais.
+- Saldos contabilizado e disponível foram separados; pendências alteram o disponível, mas não o livro concluído.
+- O cartão Hoje mostra fluxo externo concluído, pendentes, transferências internas, conversões e taxas, com detalhamento das movimentações usadas.
+- Posições confiáveis do fim do extrato podem gerar snapshots de reconciliação por produto e data.
+- A revisão foi dividida em corrigir dados, confirmar vínculos, ensinar contexto e organizar categorias opcionais.
+- Descrições amigáveis foram adicionadas, mantendo a descrição bancária integral nos detalhes.
+- Contas podem ser renomeadas, arquivadas, reativadas, excluídas quando vazias e mescladas com movimentação dos vínculos relacionados.
+- Criadas Memória Financeira, base de conhecimento, propostas de auditoria e histórico de execuções de IA.
+- Adicionada Saúde da Base com verificações concretas de reconciliação, desconhecidos técnicos, pendências, vínculos, cobertura e backup.
+- Insights decorativos ou puramente óbvios são filtrados; o motor exige impacto, mudança relevante, compreensão ou ação útil.
+- Adicionada rota protegida `/api/financial-audit` para a OpenAI Responses API, com chave somente no servidor e saída JSON estruturada.
+- A IA apenas propõe ações. O aplicativo valida tipos, contas, categorias e proteção de decisões manuais antes de mostrar uma prévia e aplicar com checkpoint.
+- Pesquisa web é opcional e limitada a comerciantes, empresas, instituições e documentação pública. Pessoas particulares não podem ser pesquisadas.
+- Navegação, Home, importador, revisão e cartões de movimentação foram reorganizados para uso móvel e melhor rastreabilidade.
+- Cache do service worker atualizado para Alpha 6.
+- Validado com compilação TypeScript direta, typecheck estrutural com stubs e smoke tests sobre os extratos reais da Wise e Revolut. npm, Vitest, Vite, navegador, Supabase e E2E não foram executados.
+
 ## 0.9.0-alpha.5.3 - 2026-07-31
 
 - Importação bancária passa a detectar Wise ou Revolut pelo arquivo, sem depender da conta escolhida anteriormente.

@@ -10,6 +10,7 @@ import {
 import type { AppState, Transaction } from '../core/types';
 import { addCivilDays, civilDaysBetween } from '../domain/dates';
 import type { FinancialInsight, InsightConfidence, InsightEngineResult, InsightTone } from './types';
+import { isActionableFinancialInsight } from './actionability';
 
 interface CandidateInput {
   id: string;
@@ -755,6 +756,7 @@ export function generateInsights(
   const now = options.now ?? new Date();
   const eligible = generated
     .filter((insight) => insight.confidence !== 'low' || insight.priority >= 90)
+    .filter(isActionableFinancialInsight)
     .filter((insight) => !dismissedRecently(state, insight, now))
     .sort((a, b) => b.priority - a.priority || b.novelty - a.novelty || a.title.localeCompare(b.title));
   const deduped = deduplicate(eligible);

@@ -109,15 +109,19 @@ export function buildImpactInsights(input: {
     transaction.kind === 'transfer'
     && transaction.direction === 'outflow'
     && !transaction.analysisExcluded
-    && !allocatedTransactionIds.has(transaction.id));
-  if (undetailedTransfers.length > 0) {
+    && !allocatedTransactionIds.has(transaction.id)
+    && !transaction.counterpartyEntityId);
+  const counterparties = new Set(undetailedTransfers
+    .map((transaction) => transaction.merchantNormalized)
+    .filter(Boolean));
+  if (counterparties.size > 0 && undetailedTransfers.length >= 3) {
     const total = undetailedTransfers.reduce((sum, transaction) => addCents(sum, Math.abs(signedNetMovement(transaction))), 0);
     items.push({
-      id: 'undetailed-transfers', group: 'opportunity', tone: 'neutral', title: 'Parte das transferências ainda não tem finalidade',
-      message: 'Detalhar pensão, assinatura compartilhada, mercado ou reembolso faz as categorias refletirem a vida real, uma ambição ousada para um extrato bancário.',
-      impactLabel: 'Sem contexto econômico', impactValue: formatMoney(total),
-      evidence: [{ label: 'Movimentações', value: String(undetailedTransfers.length) }],
-      action: 'transfer-details', actionLabel: 'Detalhar transferências',
+      id: 'unknown-transfer-contexts', group: 'opportunity', tone: 'neutral', title: 'Algumas pessoas recorrentes ainda não têm contexto',
+      message: `Há ${counterparties.size} ${counterparties.size === 1 ? 'contraparte recorrente' : 'contrapartes recorrentes'} sem vínculo na Memória Financeira. Identificar cada grupo uma vez evita revisar transferência por transferência.`,
+      impactLabel: 'Movimento sem contexto', impactValue: formatMoney(total),
+      evidence: [{ label: 'Transferências', value: String(undetailedTransfers.length) }, { label: 'Grupos de contraparte', value: String(counterparties.size) }],
+      action: 'transfer-details', actionLabel: 'Ensinar contexto por grupo',
     });
   }
 

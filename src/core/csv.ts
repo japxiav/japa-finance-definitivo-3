@@ -6,6 +6,8 @@ import { identifyTechnicalMovement, isCategoryReviewApplicable } from '../classi
 import { isCategoryCompatible } from '../classification/categoryCompatibility';
 import { parseMoneyToCents, parseSignedMoneyToCents } from './money';
 import { applyOwnerIdentityContext } from '../application/ownerIdentity';
+import { accountBookId, accountBookName, normalizeProductName, sameAccountBook } from '../application/accountBooks';
+import { withFriendlyDescription } from '../application/transactionPresentation';
 import type {
   Account,
   AppState,
@@ -20,10 +22,11 @@ import type {
   TransactionStatus,
 } from './types';
 
-export const PARSER_VERSION = '0.7.0';
+export const PARSER_VERSION = '0.8.0';
 
 export interface CurrencyPreview {
   key: string;
+  accountId: string;
   currency: string;
   product?: string;
   label: string;
@@ -34,6 +37,14 @@ export interface CurrencyPreview {
   calculatedEndBalanceCents?: number;
   reconciliationDifferenceCents?: number;
   reconciliation: 'reconciled' | 'mismatch' | 'unavailable';
+  lastReportingDate?: string;
+}
+
+export interface TransactionUpdatePreview {
+  existingId: string;
+  incoming: Transaction;
+  changedFields: string[];
+  reason: string;
 }
 
 export interface ImportDestinationPreview {
@@ -50,6 +61,7 @@ export interface Preview {
   createdAccounts?: Account[];
   destinations?: ImportDestinationPreview[];
   newTransactions: Transaction[];
+  updates: TransactionUpdatePreview[];
   possibleDuplicates: PossibleDuplicate[];
   confirmedDuplicateIds: string[];
   issues: ImportIssue[];
@@ -177,8 +189,9 @@ function detectParserName(headers: string[], preferred?: Account, fileName = '')
   return preferred ? parserNameFor(preferred) : 'wise_csv';
 }
 
-function deterministicAccountId(institution: Account['institution'], currency: string): string {
-  return `${institution}-${currency.toLocaleLowerCase('en-IE').replace(/[^a-z0-9]+/g, '-')}`;
+function productForRow(parserName: ParserName, row: Record<string, string>): string {
+  if (parserName === 'wise_csv') return 'Conta principal';
+  return normalizeProductName(get(row, ['Product', 'Produto']) || 'Atual');
 }
 
 export interface BankCsvInspection {
@@ -201,35 +214,50 @@ export function inspectBankCsv(
   const parserName = detectParserName(document.headers, preferred, fileName);
   validateKnownFormat(document.headers, parserName);
   const institution = parserName === 'wise_csv' ? 'wise' : 'revolut';
-  const currencies = new Set<string>();
+  const ledgers = new Map<string, { currency: string; product: string }>();
   for (const row of document.rows) {
-    for (const raw of [
-      get(row, ['Currency', 'Amount currency', 'Moeda', 'Moeda do valor']),
-      get(row, ['Source currency', 'SourceCurrency', 'Moeda de origem']),
-      get(row, ['Target currency', 'TargetCurrency', 'Moeda de destino']),
-    ]) {
+    const product = productForRow(parserName, row);
+    const values = parserName === 'wise_csv'
+      ? [get(row, ['Currency', 'Amount currency', 'Moeda', 'Moeda do valor'])]
+      : [get(row, ['Currency', 'Moeda'])];
+    for (const raw of values) {
       const currency = raw.trim().toUpperCase();
-      if (/^[A-Z]{3,6}$/.test(currency)) currencies.add(currency);
+      if (/^[A-Z]{3,6}$/.test(currency)) ledgers.set(`${currency}|${product}`, { currency, product });
     }
   }
-  if (!currencies.size && preferred?.currency) currencies.add(preferred.currency);
-  if (!currencies.size) throw new Error('Não foi possível detectar a moeda do extrato.');
+  if (!ledgers.size && preferred?.currency) {
+    const product = normalizeProductName(preferred.product || (institution === 'wise' ? 'Conta principal' : 'Atual'));
+    ledgers.set(`${preferred.currency}|${product}`, { currency: preferred.currency, product });
+  }
+  if (!ledgers.size) throw new Error('Não foi possível detectar a moeda e o produto do extrato.');
 
   const createdAccounts: Account[] = [];
-  const accounts = [...currencies].sort().map((currency) => {
-    const existing = state.accounts.find((account) => account.institution === institution && account.currency === currency);
-    if (existing) return existing;
+  const accounts = [...ledgers.values()].sort((a,b) => a.currency.localeCompare(b.currency) || a.product.localeCompare(b.product)).map(({ currency, product }) => {
+    const template: Account = { id: '', name: '', currency, institution, product, active: true };
+    const existing = state.accounts.find((account) => sameAccountBook(account, template.institution, template.currency, template.product));
+    if (existing) return { ...existing, product, active: true };
     const account: Account = {
-      id: deterministicAccountId(institution, currency),
-      name: `${institution === 'wise' ? 'Wise' : 'Revolut'} ${currency}`,
+      id: accountBookId(institution, currency, product),
+      name: accountBookName(institution, currency, product),
       currency,
       institution,
+      product,
+      source: 'import',
       active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     createdAccounts.push(account);
     return account;
   });
-  return { parserName, institution, currencies: [...currencies].sort(), rowsRead: document.rows.length, accounts, createdAccounts };
+  return {
+    parserName,
+    institution,
+    currencies: [...new Set(accounts.map((account) => account.currency))].sort(),
+    rowsRead: document.rows.length,
+    accounts,
+    createdAccounts,
+  };
 }
 
 function validateKnownFormat(headers: string[], parserName: ParserName) {
@@ -312,7 +340,7 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
   const ledgerMap = new Map<string, Transaction[]>();
   for (const transaction of transactions) {
     const product = transaction.bankProduct?.trim() || 'Conta principal';
-    const key = `${transaction.currency}|${product}`;
+    const key = `${transaction.accountId}|${transaction.currency}|${product}`;
     const ledger = ledgerMap.get(key) ?? [];
     ledger.push(transaction);
     ledgerMap.set(key, ledger);
@@ -328,7 +356,7 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
         const dateB = b.completedAt ?? b.startedAt ?? `${b.reportingDate}T00:00:00`;
         return dateA.localeCompare(dateB) || (a.sourceRowNumber ?? 0) - (b.sourceRowNumber ?? 0);
       });
-    const currency = primaryRows[0]?.currency ?? relevant[0]?.currency ?? key.split('|')[0]!;
+    const currency = primaryRows[0]?.currency ?? relevant[0]?.currency ?? key.split('|')[1]!;
     const product = primaryRows[0]?.bankProduct?.trim() || relevant[0]?.bankProduct?.trim() || undefined;
     const label = product ? `${currency} · ${product}` : currency;
     const movements = relevant
@@ -341,7 +369,7 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
 
     const balanceRows = primaryRows.filter((item) => item.status === 'completed' && item.balanceAfterCents !== undefined);
     if (!balanceRows.length) {
-      return { key, currency, product, label, inflowCents, outflowCents, netCents, reconciliation: 'unavailable' };
+      return { key, accountId: relevant[0]?.accountId ?? '', currency, product, label, inflowCents, outflowCents, netCents, reconciliation: 'unavailable', lastReportingDate: primaryRows.at(-1)?.reportingDate };
     }
 
     const first = balanceRows[0]!;
@@ -357,6 +385,7 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
     const reconciliationDifferenceCents = subtractCents(statementEndBalanceCents, calculatedEndBalanceCents);
     return {
       key,
+      accountId: last.accountId,
       currency,
       product,
       label,
@@ -367,6 +396,7 @@ function currencyPreviews(transactions: Transaction[]): CurrencyPreview[] {
       calculatedEndBalanceCents,
       reconciliationDifferenceCents,
       reconciliation: reconciliationDifferenceCents === 0 ? 'reconciled' : 'mismatch',
+      lastReportingDate: last.reportingDate,
     };
   }).sort((a, b) => a.currency.localeCompare(b.currency) || a.label.localeCompare(b.label));
 }
@@ -384,6 +414,69 @@ function issue(params: Omit<ImportIssue, 'id' | 'createdAt' | 'status'> & { stat
     status: params.status ?? 'unresolved',
     ...params,
   };
+}
+
+function bankFieldsChanged(existing: Transaction, incoming: Transaction): string[] {
+  const fields: (keyof Transaction)[] = [
+    'status','reportedAmountCents','netMovementCents','availableImpactCents','feeCents','feeTreatment',
+    'balanceAfterCents','bankState','bankType','bankProduct','startedAt','completedAt','reportingDate',
+    'descriptionOriginal','originalData',
+  ];
+  return fields.filter((field) => JSON.stringify(existing[field]) !== JSON.stringify(incoming[field])).map(String);
+}
+
+export function mergeImportedTransaction(existing: Transaction, incoming: Transaction): Transaction {
+  const manualTechnical = existing.kindSource === 'manual';
+  const manualCategory = existing.categorySource === 'manual';
+  const bankUpdatedAt = new Date().toISOString();
+  const merged: Transaction = {
+    ...existing,
+    importId: existing.importId,
+    bankTransactionId: incoming.bankTransactionId ?? existing.bankTransactionId,
+    sourceFileHash: incoming.sourceFileHash,
+    sourceRowNumber: incoming.sourceRowNumber,
+    sourceFingerprint: incoming.sourceFingerprint,
+    dedupFingerprint: incoming.dedupFingerprint,
+    semanticFingerprint: incoming.semanticFingerprint,
+    lifecycleFingerprint: incoming.lifecycleFingerprint ?? existing.lifecycleFingerprint,
+    amountCents: incoming.amountCents,
+    reportedAmountCents: incoming.reportedAmountCents,
+    netMovementCents: incoming.netMovementCents,
+    availableImpactCents: incoming.availableImpactCents,
+    feeCents: incoming.feeCents ?? existing.feeCents,
+    feeTreatment: incoming.feeTreatment ?? existing.feeTreatment,
+    balanceAfterCents: incoming.balanceAfterCents ?? existing.balanceAfterCents,
+    status: incoming.status,
+    bankState: incoming.bankState,
+    bankType: incoming.bankType ?? existing.bankType,
+    bankProduct: incoming.bankProduct ?? existing.bankProduct,
+    startedAt: incoming.startedAt ?? existing.startedAt,
+    completedAt: incoming.completedAt ?? existing.completedAt,
+    reportingDate: incoming.reportingDate,
+    descriptionOriginal: incoming.descriptionOriginal || existing.descriptionOriginal,
+    originalData: incoming.originalData,
+    friendlyDescription: incoming.friendlyDescription,
+    bankUpdatedAt,
+    updatedAt: bankUpdatedAt,
+  };
+  if (!manualTechnical) Object.assign(merged, {
+    kind: incoming.kind,
+    technicalType: incoming.technicalType,
+    kindSource: incoming.kindSource,
+    analysisExcluded: incoming.analysisExcluded,
+    transferGroupId: incoming.transferGroupId,
+    compoundEventId: incoming.compoundEventId,
+  });
+  if (!manualCategory) Object.assign(merged, {
+    categoryId: incoming.categoryId,
+    categorySource: incoming.categorySource,
+    categoryReviewStatus: incoming.categoryReviewStatus,
+  });
+  if (!manualTechnical && !manualCategory) Object.assign(merged, {
+    needsReview: incoming.needsReview,
+    reviewReasons: incoming.reviewReasons,
+  });
+  return merged;
 }
 
 export async function previewBankCsv(
@@ -416,8 +509,9 @@ export async function previewBankCsv(
       const rawStarted = get(row, ['Started Date', 'Started date', 'Started at', 'Created on', 'Created at', 'Data de início', 'Data de criação']);
       const rawCompleted = get(row, ['Completed Date', 'Completed date', 'Date', 'Finished at', 'Finished on', 'Transfer date', 'Data de conclusão', 'Data', 'Data da transferência']);
       const bankState = get(row, ['State', 'Status', 'Estado']);
-      const bankType = get(row, ['Type', 'Direction', 'Tipo', 'Direção']);
-      const bankProduct = get(row, ['Product', 'Produto']);
+      const bankType = [get(row, ['Type', 'Direction', 'Tipo', 'Direção', 'Transaction Type']), get(row, ['Transaction Details Type'])].filter(Boolean).join(' ');
+      const bankProduct = productForRow(parserName, row);
+      if (parserName === 'revolut_csv' && normalizeProductName(bankProduct) !== normalizeProductName(account.product || 'Atual')) return;
       if (!rawStarted && !rawCompleted) throw new Error('Data inicial e data concluída ausentes');
 
       const amount = parserName === 'wise_csv'
@@ -450,24 +544,13 @@ export async function previewBankCsv(
       }
 
       const transactionStatus = transactionStatusFromBankState(bankState);
-      if (transactionStatus === 'pending') {
-        issues.push(issue({
-          importId,
-          accountId,
-          kind: 'pending',
-          message: 'Transação pendente no extrato; não foi gravada como fato concluído.',
-          rowNumber,
-          originalData: row,
-        }));
-        return;
-      }
 
-      const feeRaw = get(row, ['Fee', 'Commission', 'Source fee amount', 'Taxa', 'Comissão', 'Valor da taxa de origem']);
+      const feeRaw = get(row, ['Fee', 'Commission', 'Source fee amount', 'Total fees', 'Taxa', 'Comissão', 'Valor da taxa de origem']);
       const balanceRaw = get(row, ['Balance', 'Running balance', 'Saldo', 'Saldo corrente']);
       const feeCents = feeRaw.trim() ? parseMoneyToCents(feeRaw) : undefined;
       const feeTreatment = feeTreatmentForParser(parserName);
       const reportedAmountCents = amount.signedCents;
-      const primaryNetMovementCents = transactionStatus === 'reverted' ? 0 : reportedAmountCents;
+      const primaryNetMovementCents = transactionStatus === 'completed' ? reportedAmountCents : 0;
       const balanceAfterCents = balanceRaw.trim() ? parseSignedMoneyToCents(balanceRaw) : undefined;
       const direction: Direction = reportedDirection;
       const technical = identifyTechnicalMovement({ bankType, description, direction });
@@ -521,6 +604,7 @@ export async function previewBankCsv(
       const occurrence = (occurrenceByBase.get(base) ?? 0) + 1;
       occurrenceByBase.set(base, occurrence);
       const dedupFingerprint = `${base}:${occurrence}`;
+      const lifecycleFingerprint = stableHash(JSON.stringify([accountId, parsedStarted?.canonicalAt ?? effectiveDate.reportingDate, amountCents, direction, normalizeMerchant(description), amount.currency, bankProduct, 'primary']));
       const primaryId = crypto.randomUUID();
 
       parsedTransactions.push({
@@ -539,7 +623,9 @@ export async function previewBankCsv(
         sourceFingerprint: `${fileHash}:${rowNumber}:primary`,
         sourceComponent: 'primary',
         semanticFingerprint: base,
+        lifecycleFingerprint,
         balanceAfterCents,
+        availableImpactCents: transactionStatus === 'pending' ? reportedAmountCents : undefined,
         currency: amount.currency,
         direction,
         source: parserName,
@@ -567,6 +653,7 @@ export async function previewBankCsv(
         createdAt,
         updatedAt: createdAt,
       });
+      parsedTransactions[parsedTransactions.length - 1] = withFriendlyDescription(parsedTransactions[parsedTransactions.length - 1]!);
 
       if (transactionStatus === 'completed' && feeTreatment === 'ADDITIONAL_TO_REPORTED_AMOUNT' && feeCents && feeCents > 0) {
         const feeBase = stableHash(`${base}|fee|${feeCents}`);
@@ -586,6 +673,7 @@ export async function previewBankCsv(
           sourceComponent: 'fee',
           feeOfTransactionId: primaryId,
           semanticFingerprint: feeBase,
+          lifecycleFingerprint: stableHash(`${lifecycleFingerprint}|fee`),
           currency: amount.currency,
           direction: 'outflow',
           source: parserName,
@@ -625,19 +713,20 @@ export async function previewBankCsv(
   });
 
   for (let index = 0; index < parsedTransactions.length; index += 1) {
-    parsedTransactions[index] = applyOwnerIdentityContext(parsedTransactions[index]!, state.ownerIdentity);
+    parsedTransactions[index] = withFriendlyDescription(applyOwnerIdentityContext(parsedTransactions[index]!, state.ownerIdentity));
   }
 
   const existingBankIds = new Map(
     state.transactions
       .filter((transaction) => transaction.bankTransactionId)
-      .map((transaction) => [`${transaction.accountId}|${transaction.bankTransactionId}`, transaction.id]),
+      .map((transaction) => [`${transaction.accountId}|${transaction.bankTransactionId}`, transaction]),
   );
   const existingExactRows = new Map(
     state.transactions
       .filter((transaction) => transaction.sourceFileHash && transaction.sourceRowNumber)
-      .map((transaction) => [`${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}|${transaction.sourceComponent ?? 'primary'}`, transaction.id]),
+      .map((transaction) => [`${transaction.accountId}|${transaction.sourceFileHash}|${transaction.sourceRowNumber}|${transaction.sourceComponent ?? 'primary'}`, transaction]),
   );
+  const existingByLifecycle = new Map(state.transactions.filter((item) => item.lifecycleFingerprint).map((item) => [`${item.accountId}|${item.lifecycleFingerprint}`, item]));
   const existingByFingerprint = new Map<string, string[]>();
   for (const transaction of state.transactions) {
     const semanticKey = transaction.semanticFingerprint ?? transaction.dedupFingerprint.replace(/:\d+$/, '');
@@ -648,6 +737,7 @@ export async function previewBankCsv(
 
   const seenBankIds = new Set<string>();
   const confirmedDuplicateIds: string[] = [];
+  const updates: TransactionUpdatePreview[] = [];
   const confirmedDuplicateRows = new Set<number>();
   const newTransactions: Transaction[] = [];
   const possibleDuplicates: PossibleDuplicate[] = [];
@@ -658,10 +748,25 @@ export async function previewBankCsv(
     const existingBankMatch = bankKey ? existingBankIds.get(bankKey) : undefined;
     const repeatedBankIdInFile = bankKey ? seenBankIds.has(bankKey) : false;
     const exactSourceMatch = existingExactRows.get(sourceKey);
+    const lifecycleMatch = transaction.lifecycleFingerprint
+      ? existingByLifecycle.get(`${transaction.accountId}|${transaction.lifecycleFingerprint}`)
+      : undefined;
     if (bankKey) seenBankIds.add(bankKey);
 
-    if (existingBankMatch || repeatedBankIdInFile || exactSourceMatch) {
-      confirmedDuplicateIds.push(existingBankMatch ?? exactSourceMatch ?? transaction.id);
+    const strongMatch = existingBankMatch ?? exactSourceMatch ?? lifecycleMatch;
+    if (strongMatch || repeatedBankIdInFile) {
+      if (strongMatch) {
+        const changedFields = bankFieldsChanged(strongMatch, transaction);
+        if (changedFields.length) updates.push({
+          existingId: strongMatch.id,
+          incoming: transaction,
+          changedFields,
+          reason: strongMatch.status !== transaction.status
+            ? `Estado bancário atualizado: ${strongMatch.status} → ${transaction.status}.`
+            : 'Extrato mais completo encontrado para uma movimentação existente.',
+        });
+        else confirmedDuplicateIds.push(strongMatch.id);
+      }
       if (transaction.sourceRowNumber) confirmedDuplicateRows.add(transaction.sourceRowNumber);
       continue;
     }
@@ -709,16 +814,17 @@ export async function previewBankCsv(
     status: 'active',
     rowsRead: document.rows.length,
     imported: newTransactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary').length,
-    confirmedDuplicates: confirmedDuplicateRows.size,
+    updated: updates.filter((item) => (item.incoming.sourceComponent ?? 'primary') === 'primary').length,
+    confirmedDuplicates: confirmedDuplicateRows.size - updates.filter((item) => (item.incoming.sourceComponent ?? 'primary') === 'primary').length,
     possibleDuplicates: new Set(possibleDuplicates.map((item) => item.transaction.sourceRowNumber).filter((row): row is number => Boolean(row))).size,
-    pendingRows: issues.filter((item) => item.kind === 'pending').length,
+    pendingRows: parsedTransactions.filter((item) => item.status === 'pending' && (item.sourceComponent ?? 'primary') === 'primary').length,
     rejected: issues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch').length,
     currencies: [...new Set(currencies.map((item) => item.currency))],
     firstReportingDate: reportingDates[0],
     lastReportingDate: reportingDates.at(-1),
   };
 
-  return { batch, account, newTransactions, possibleDuplicates, confirmedDuplicateIds, issues, currencies, blockingIssueCount };
+  return { batch, account, newTransactions, updates, possibleDuplicates, confirmedDuplicateIds, issues, currencies, blockingIssueCount };
 }
 
 export async function previewSmartBankCsv(
@@ -744,6 +850,7 @@ export async function previewSmartBankCsv(
   const createdAt = new Date().toISOString();
   const remapTransaction = (transaction: Transaction): Transaction => ({ ...transaction, importId: masterImportId });
   const newTransactions = previews.flatMap((preview) => preview.newTransactions.map(remapTransaction));
+  const updates = previews.flatMap((preview) => preview.updates.map((item) => ({ ...item, incoming: remapTransaction(item.incoming) })));
   const possibleDuplicates = previews.flatMap((preview) => preview.possibleDuplicates.map((item) => ({
     ...item,
     transaction: remapTransaction(item.transaction),
@@ -772,9 +879,10 @@ export async function previewSmartBankCsv(
     createdAt,
     rowsRead: inspection.rowsRead,
     imported: primaryTransactions.length,
+    updated: updates.filter((item) => (item.incoming.sourceComponent ?? 'primary') === 'primary').length,
     confirmedDuplicates: new Set(previews.flatMap((preview) => preview.confirmedDuplicateIds)).size,
     possibleDuplicates: new Set(possibleDuplicates.map((item) => item.transaction.sourceRowNumber).filter(Boolean)).size,
-    pendingRows: uniqueIssues.filter((item) => item.kind === 'pending').length,
+    pendingRows: [...newTransactions, ...updates.map((item) => item.incoming)].filter((item) => item.status === 'pending' && (item.sourceComponent ?? 'primary') === 'primary').length,
     rejected: uniqueIssues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch').length,
     currencies: inspection.currencies,
     firstReportingDate: reportingDates[0],
@@ -784,7 +892,7 @@ export async function previewSmartBankCsv(
     account,
     currency: account.currency,
     created: inspection.createdAccounts.some((item) => item.id === account.id),
-    transactionCount: primaryTransactions.filter((transaction) => transaction.accountId === account.id).length,
+    transactionCount: primaryTransactions.filter((transaction) => transaction.accountId === account.id).length + updates.filter((item) => item.incoming.accountId === account.id && (item.incoming.sourceComponent ?? 'primary') === 'primary').length,
   }));
   const blockingIssueCount = uniqueIssues.filter((item) => item.kind === 'row_error' || item.kind === 'currency_mismatch' || item.kind === 'format_change').length;
   return {
@@ -794,6 +902,7 @@ export async function previewSmartBankCsv(
     createdAccounts: inspection.createdAccounts,
     destinations,
     newTransactions,
+    updates,
     possibleDuplicates,
     confirmedDuplicateIds: [...new Set(previews.flatMap((preview) => preview.confirmedDuplicateIds))],
     issues: uniqueIssues,

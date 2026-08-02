@@ -1,12 +1,12 @@
 import type { AppState } from '../core/types';
 
 export const initialState: AppState = {
-  schemaVersion: 11,
+  schemaVersion: 12,
   accounts: [
-    { id: 'revolut-eur', name: 'Revolut EUR', currency: 'EUR', institution: 'revolut', active: true },
-    { id: 'revolut-brl', name: 'Revolut BRL', currency: 'BRL', institution: 'revolut', active: false },
-    { id: 'wise-eur', name: 'Wise EUR', currency: 'EUR', institution: 'wise', active: false },
-    { id: 'wise-brl', name: 'Wise BRL', currency: 'BRL', institution: 'wise', active: false },
+    { id: 'revolut-eur', name: 'Revolut Atual EUR', currency: 'EUR', institution: 'revolut', product: 'Atual', source: 'default', active: true },
+    { id: 'revolut-brl', name: 'Revolut Atual BRL', currency: 'BRL', institution: 'revolut', product: 'Atual', source: 'default', active: false },
+    { id: 'wise-eur', name: 'Wise EUR', currency: 'EUR', institution: 'wise', product: 'Conta principal', source: 'default', active: false },
+    { id: 'wise-brl', name: 'Wise BRL', currency: 'BRL', institution: 'wise', product: 'Conta principal', source: 'default', active: false },
   ],
   transactions: [],
   imports: [],
@@ -22,6 +22,7 @@ export const initialState: AppState = {
     { id: 'leisure', name: 'Lazer', active: true, type: 'expense', icon: 'PartyPopper', system: true },
     { id: 'health', name: 'Saúde', active: true, type: 'expense', icon: 'HeartPulse', system: true },
     { id: 'family', name: 'Família', active: true, type: 'both', icon: 'Users', system: true },
+    { id: 'daughter-support', name: 'Filha, pensão e ajuda', active: true, type: 'expense', icon: 'HeartHandshake', system: true },
     { id: 'education', name: 'Educação', active: true, type: 'expense', icon: 'GraduationCap', system: true },
     { id: 'music', name: 'Música', active: true, type: 'expense', icon: 'Music2', system: true },
     { id: 'work', name: 'Trabalho', active: true, type: 'both', icon: 'BriefcaseBusiness', system: true },
@@ -37,6 +38,10 @@ export const initialState: AppState = {
   reviewDecisions: [],
   transactionAllocations: [],
   internalTransferDecisions: [],
+  financialMemory: [],
+  knowledgeBase: [],
+  auditProposals: [],
+  aiAuditRuns: [],
   ownerIdentity: {
     displayName: 'Diogo',
     aliases: ['Diogo'],

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import {
   ArrowLeftRight,
   BadgeCheck,
@@ -40,7 +40,7 @@ import {
 } from 'lucide-react';
 import { AuthScreen } from './auth/AuthScreen';
 import { UpdatePassword } from './auth/UpdatePassword';
-import { previewSmartBankCsv, type Preview } from './core/csv';
+import { mergeImportedTransaction, previewSmartBankCsv, type Preview } from './core/csv';
 import { financialDecisionFacade, type AssistantResult } from './application/FinancialDecisionFacade';
 import { createReconciliationSnapshotBatch } from './application/reconciliation';
 import { previewRevolutPdf } from './core/pdf';
@@ -64,6 +64,11 @@ import { ReviewGroupsPanel } from './components/ReviewGroupsPanel';
 import { BulkRuleModal, type BulkRuleInput } from './components/BulkRuleModal';
 import { IdentityProfileModal } from './components/IdentityProfileModal';
 import { TransferRecurrencePanel } from './components/TransferRecurrencePanel';
+import { DataHealthPanel } from './components/DataHealthPanel';
+import { FinancialMemoryPanel } from './components/FinancialMemoryPanel';
+import { AiAuditPanel } from './components/AiAuditPanel';
+import { TransactionDetailsSheet } from './components/TransactionDetailsSheet';
+import { AuditProposalConfirmModal } from './components/AuditProposalConfirmModal';
 import { createConfirmedBatch, getUndoImpact, restoreImport, undoImport } from './core/imports';
 import { formatMoney, parseSignedMoneyToCents } from './core/money';
 import { normalizeMerchant } from './core/merchant';
@@ -105,6 +110,9 @@ import type {
   TechnicalMovementType,
   TransferPurpose,
   OwnerIdentityProfile,
+  AuditProposal,
+  FinancialEntityRelationship,
+  FinancialEntityType,
 } from './core/types';
 import { initialState } from './data/defaults';
 import { applyCategoryDecision, deferReviewGroup, reopenReviewGroup, undoLatestReviewDecision } from './classification/decisions';
@@ -117,6 +125,14 @@ import {
   technicalTypeLabel,
 } from './classification/technicalClassifier';
 import { addCivilDays, civilDaysBetween, isCivilDate } from './domain/dates';
+import { buildTodayActivity } from './application/todayActivity';
+import { buildDataHealthReport } from './application/dataHealth';
+import { buildMemorySuggestions, createMemoryEntity } from './application/financialMemory';
+import { reprocessFinancialState } from './application/reprocess';
+import { buildDeterministicAuditProposals, createAiAuditRun } from './application/smartAudit';
+import { requestAiFinancialAudit } from './application/aiClient';
+import { applyAuditProposal, previewAuditProposal } from './application/auditActions';
+import { countAccountReferences, createManualAccount, deleteEmptyAccount, mergeAccounts, renameAccount as renameManagedAccount, setAccountArchived } from './application/accountManagement';
 import { supabase, supabaseConfigured, supabaseConfigurationErrors, verifyCurrentUserAccess } from './lib/supabase';
 
 
@@ -201,7 +217,7 @@ export default function App() {
     let disposed = false;
     let authEventVersion = 0;
 
-    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event: AuthChangeEvent, nextSession: Session | null) => {
       authEventVersion += 1;
       if (disposed) return;
       if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true);
@@ -211,7 +227,7 @@ export default function App() {
     });
 
     const requestVersion = authEventVersion;
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
       if (disposed || authEventVersion !== requestVersion) return;
       setSession(data.session);
       setAuthReady(true);
@@ -314,8 +330,11 @@ function FinanceApp({ session }: { session: Session }) {
   const [reviewOnly, setReviewOnly] = useState(false);
   const [bulkRuleOpen, setBulkRuleOpen] = useState(false);
   const [transferDetailTransaction, setTransferDetailTransaction] = useState<Transaction | null>(null);
+  const [transactionSheet, setTransactionSheet] = useState<Transaction | null>(null);
+  const [aiAuditBusy, setAiAuditBusy] = useState(false);
+  const [pendingAuditProposal, setPendingAuditProposal] = useState<AuditProposal | null>(null);
   const [discoveriesView, setDiscoveriesView] = useState<'now' | 'opportunity' | 'patterns'>('now');
-  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'accounts' | 'review'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'accounts' | 'review' | 'health' | 'memory' | 'ai'>('home');
   const [assistantQuestion, setAssistantQuestion] = useState('');
   const [assistantTargetAccountId, setAssistantTargetAccountId] = useState('');
   const [assistantAnswer, setAssistantAnswer] = useState<AssistantResult | null>(null);
@@ -689,23 +708,43 @@ function FinanceApp({ session }: { session: Session }) {
     const batch = createConfirmedBatch(preview.batch, transactions.filter((transaction) => (transaction.sourceComponent ?? 'primary') === 'primary').length);
     setState((current) => {
       if (!current) return current;
+      const now = new Date().toISOString();
       const destinationIds = new Set(preview.accounts?.map((account) => account.id) ?? [preview.account.id]);
       const existingIds = new Set(current.accounts.map((account) => account.id));
       const accounts = [
-        ...current.accounts.map((account) => destinationIds.has(account.id) ? { ...account, active: true } : account),
+        ...current.accounts.map((account) => destinationIds.has(account.id) ? { ...account, active: true, archivedAt: undefined, updatedAt: now } : account),
         ...(preview.createdAccounts ?? []).filter((account) => !existingIds.has(account.id)).map((account) => ({ ...account, active: true })),
       ];
+      const updateById = new Map(preview.updates.map((item) => [item.existingId, item]));
+      const updatedExisting = current.transactions.map((existing) => {
+        const update = updateById.get(existing.id);
+        return update ? mergeImportedTransaction(existing, update.incoming) : existing;
+      });
       const ownAccountIds = [...new Set([
         ...current.ownerIdentity.ownAccountIds,
         ...accounts.filter((account) => destinationIds.has(account.id)).map((account) => account.id),
       ])];
-      return withRebuiltReviewGroups({
+      const reconciledBooks = preview.currencies.filter((item) => item.reconciliation === 'reconciled'
+        && item.statementEndBalanceCents !== undefined && item.lastReportingDate);
+      const reconciliationBatches = reconciledBooks.map((item) => {
+        const logicalAsOf = `${item.lastReportingDate}T23:59:59.000Z`;
+        return { id: crypto.randomUUID(), logicalDate: item.lastReportingDate!, logicalAsOf, createdAt: now, source: 'import' as const, status: 'COMPLETE' as const };
+      });
+      const balanceSnapshots = reconciledBooks.map((item, index) => ({
+        id: crypto.randomUUID(), accountId: item.accountId, currency: item.currency,
+        balanceCents: item.statementEndBalanceCents!, asOf: reconciliationBatches[index]!.logicalAsOf,
+        source: 'import' as const, sourceImportId: batch.id, reconciled: true, createdAt: now,
+        reconciliationBatchId: reconciliationBatches[index]!.id, logicalAsOf: reconciliationBatches[index]!.logicalAsOf,
+      }));
+      return reprocessFinancialState({
         ...current,
         accounts,
-        ownerIdentity: { ...current.ownerIdentity, ownAccountIds, updatedAt: new Date().toISOString() },
-        transactions: [...transactions, ...current.transactions],
+        ownerIdentity: { ...current.ownerIdentity, ownAccountIds, updatedAt: now },
+        transactions: [...transactions, ...updatedExisting],
         imports: [batch, ...current.imports],
         importIssues: [...issues, ...current.importIssues],
+        reconciliationBatches: [...reconciliationBatches, ...current.reconciliationBatches],
+        balanceSnapshots: [...balanceSnapshots, ...current.balanceSnapshots],
       });
     });
     setPreview(null);
@@ -1409,7 +1448,7 @@ function FinanceApp({ session }: { session: Session }) {
         ? (transaction.reportedAmountCents ?? (transaction.direction === 'inflow' ? transaction.amountCents : -transaction.amountCents))
         : signedNetMovement(transaction);
       return <article className={`tx ${transaction.needsReview ? 'needs-review' : ''} ${reverted ? 'reverted' : ''}`} key={transaction.id}>
-        <div className="tx-main"><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : allocations.length ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small>{allocationSummary && <span className="allocation-summary">{allocationSummary}</span>}{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</div>
+        <button type="button" className="tx-main" onClick={() => setTransactionSheet(transaction)}><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : allocations.length ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small>{allocationSummary && <span className="allocation-summary">{allocationSummary}</span>}{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</button>
         <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || allocations.length > 0 || !isCategoryReviewApplicable(transaction.technicalType)}><option value="">{allocations.length ? 'Usa o detalhamento' : 'Sem categoria'}</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>{transaction.kind === 'transfer' && !transaction.analysisExcluded && !reverted && <button type="button" className="secondary tx-detail-button" onClick={() => setTransferDetailTransaction(transaction)}><ReceiptText size={14} /> {allocations.length ? 'Editar detalhes' : 'Detalhar transferência'}</button>}</div>
         <strong className={`${displayedMovement > 0 ? 'positive' : ''} ${reverted ? 'reverted-amount' : ''}`}>{displayedMovement < 0 ? '-' : '+'}{formatMoney(Math.abs(displayedMovement), transaction.currency)}{reverted && <small>revertida</small>}</strong>
       </article>;
@@ -1439,9 +1478,9 @@ function FinanceApp({ session }: { session: Session }) {
       && transaction.reportingDate >= analytics.current.range.start
       && transaction.reportingDate <= analytics.current.range.end)
     .slice(0, 5);
-  const todayTransactions = visibleTransactions.filter((transaction) => transaction.status === 'completed' && transaction.currency === currency && transaction.reportingDate === today);
-  const todayInflowCents = todayTransactions.filter((transaction) => signedNetMovement(transaction) > 0).reduce((sum, transaction) => sum + signedNetMovement(transaction), 0);
-  const todayOutflowCents = todayTransactions.filter((transaction) => signedNetMovement(transaction) < 0).reduce((sum, transaction) => sum + Math.abs(signedNetMovement(transaction)), 0);
+  const todayActivity = buildTodayActivity(financeState, currency, today);
+  const healthReport = buildDataHealthReport(financeState);
+  const memorySuggestions = buildMemorySuggestions(financeState, currency);
   const balanceConfidenceLabel = currencyPosition.confidence === 'confirmed' ? 'Confirmado'
     : currencyPosition.confidence === 'estimated' ? 'Estimado após a última confirmação'
       : currencyPosition.confidence === 'stale' ? 'Possivelmente desatualizado' : 'Precisa confirmar';
@@ -1450,6 +1489,9 @@ function FinanceApp({ session }: { session: Session }) {
   const displayedCurrentBalance = currencyPosition.currentBalanceCents !== undefined
     ? formatMoney(currencyPosition.currentBalanceCents, currency)
     : 'Ainda não informado';
+  const displayedAvailableBalance = currencyPosition.availableBalanceCents !== undefined
+    ? formatMoney(currencyPosition.availableBalanceCents, currency)
+    : undefined;
   const topCategoryAmount = categoryRows.reduce((sum, item) => sum + item.amountCents, 0);
   const otherCategoryAmount = Math.max(0, analytics.current.summary.expenseCents - topCategoryAmount);
   const primaryImpactInsight = nowImpactInsights[0] ?? opportunityImpactInsights[0];
@@ -1460,7 +1502,7 @@ function FinanceApp({ session }: { session: Session }) {
       {error && <section className="error-banner"><FileWarning size={18} /><span>{error}</span><button type="button" onClick={() => setError('')}><X size={16} /></button></section>}
 
       {activeTab === 'home' && <section className="home-page-v2">
-        <section className="home-hero decision-hero compact-hero"><span className="eyebrow">AGORA · {currency}</span><h1>Seu dinheiro,<br />sem adivinhação.</h1><p>Saldo, compromissos e fluxo separados. Parece básico porque deveria ser. Bancos levaram décadas para colaborar.</p></section>
+        <section className="home-context-strip"><div><span className="eyebrow">AGORA · {currency}</span><h1>Visão financeira</h1></div><p>{currencyPosition.latestAsOf ? `Posição mais recente: ${new Date(currencyPosition.latestAsOf).toLocaleString('pt-BR')}` : 'Nenhuma posição bancária confirmada ainda.'}</p></section>
 
         <section className={`financial-status ${homeStatus.tone}`}>
           <div className="status-orb"><Sparkles size={22} /></div>
@@ -1469,8 +1511,8 @@ function FinanceApp({ session }: { session: Session }) {
         </section>
 
         <section className="current-balance-card">
-          <header><div><small>SALDO ATUAL · {currency}</small><strong>{displayedCurrentBalance}</strong></div><span className={`balance-confidence ${currencyPosition.confidence}`}>{balanceConfidenceIcon}{balanceConfidenceLabel}</span></header>
-          <div className="account-position-list">{currencyPosition.positions.map((position) => <article key={position.account.id}><div><Building2 size={16} /><span><b>{position.account.name}</b><small>{position.account.institution === 'revolut' ? 'Revolut' : position.account.institution === 'wise' ? 'Wise' : position.account.institution}</small></span></div><strong>{position.currentBalanceCents !== undefined ? formatMoney(position.currentBalanceCents, currency) : 'não informado'}</strong></article>)}</div>
+          <header><div><small>SALDO CONTABILIZADO · {currency}</small><strong>{displayedCurrentBalance}</strong>{currencyPosition.pendingCount > 0 && displayedAvailableBalance && <small className="available-balance">Disponível após {currencyPosition.pendingCount} pendente(s): <b>{displayedAvailableBalance}</b></small>}</div><span className={`balance-confidence ${currencyPosition.confidence}`}>{balanceConfidenceIcon}{balanceConfidenceLabel}</span></header>
+          <div className="account-position-list">{currencyPosition.positions.map((position) => <article key={position.account.id}><div><Building2 size={16} /><span><b>{position.account.name}</b><small>{position.account.institution === 'revolut' ? 'Revolut' : position.account.institution === 'wise' ? 'Wise' : position.account.institution}{position.account.product ? ` · ${position.account.product}` : ''}{position.logicalDate ? ` · posição de ${formatReportingDate(position.logicalDate)}` : ''}</small></span></div><span className="position-values"><strong>{position.currentBalanceCents !== undefined ? formatMoney(position.currentBalanceCents, currency) : 'não informado'}</strong>{position.pendingCount > 0 && position.availableBalanceCents !== undefined && <small>disponível {formatMoney(position.availableBalanceCents, currency)}</small>}</span></article>)}</div>
           <footer><span><Cloud size={14} /> {syncLabel}</span><button type="button" className="link-button" onClick={recordBalanceSnapshot}>Atualizar saldos</button></footer>
           {currencyPosition.bridge && <details className="balance-bridge"><summary>Entenda como o saldo chegou aqui</summary><div><span><small>Saldo confirmado</small><b>{formatMoney(currencyPosition.bridge.openingBalanceCents, currency)}</b></span><span><small>Fluxo externo depois disso</small><b className={currencyPosition.bridge.externalFlowCents >= 0 ? 'positive' : 'negative'}>{formatMoney(currencyPosition.bridge.externalFlowCents, currency)}</b></span><span><small>Internas e conversões</small><b>{formatMoney(currencyPosition.bridge.internalMovementCents, currency)}</b></span><span><small>Taxas bancárias</small><b className="negative">{formatMoney(currencyPosition.bridge.feeCents, currency)}</b></span><span><small>Ajustes</small><b>{formatMoney(currencyPosition.bridge.adjustmentCents, currency)}</b></span><span className="bridge-total"><small>Saldo calculado agora</small><b>{formatMoney(currencyPosition.bridge.closingBalanceCents, currency)}</b></span></div><p>Base confirmada em {new Date(currencyPosition.bridge.logicalAsOf).toLocaleString('pt-BR')}. Movimentos posteriores atualizam o valor como estimativa até a próxima reconciliação.</p></details>}
         </section>
@@ -1483,10 +1525,10 @@ function FinanceApp({ session }: { session: Session }) {
             <button type="button" className="link-button" onClick={() => setActiveTab('planning')}>Ver planejamento</button>
           </article>
           <article className="today-card">
-            <div><small>HOJE</small><CalendarClock size={20} /></div>
-            <strong>{formatMoney(todayInflowCents - todayOutflowCents, currency)}</strong>
-            <p><span className="positive">Entrou {formatMoney(todayInflowCents, currency)}</span><span>Saiu {formatMoney(todayOutflowCents, currency)}</span></p>
-            <button type="button" className="link-button" onClick={() => { setDateStart(today); setDateEnd(today); setMonth('all'); setActiveTab('transactions'); }}>Ver movimentos de hoje</button>
+            <div><small>ATIVIDADE DE HOJE</small><CalendarClock size={20} /></div>
+            <strong>{formatMoney(todayActivity.externalNetCents, currency)}</strong>
+            {todayActivity.hasDataForToday ? <div className="today-breakdown">{todayActivity.buckets.map((bucket) => <button type="button" key={bucket.key} onClick={() => { setDateStart(today); setDateEnd(today); setMonth('all'); setActiveTab('transactions'); }}><span>{bucket.label}</span><b className={bucket.amountCents > 0 ? 'positive' : bucket.amountCents < 0 ? 'negative' : ''}>{formatMoney(bucket.amountCents, currency)}</b></button>)}</div> : <p>Nenhum dado bancário disponível para hoje.{todayActivity.latestImportedDate ? ` Último movimento: ${formatReportingDate(todayActivity.latestImportedDate)}.` : ''}</p>}
+            <button type="button" className="link-button" onClick={() => { setDateStart(today); setDateEnd(today); setMonth('all'); setActiveTab('transactions'); }}>Ver cálculo e movimentos</button>
           </article>
         </section>
 
@@ -1498,7 +1540,7 @@ function FinanceApp({ session }: { session: Session }) {
           <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Transferências internas e conversões ficam fora do fluxo. Taxas bancárias entram como despesas separadas. Saldo é posição; fluxo é movimento.</p></details>
         </section>
 
-        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <button type="button" className="recent-row" key={transaction.id} onClick={() => transaction.kind === 'transfer' && !transaction.analysisExcluded ? setTransferDetailTransaction(transaction) : setActiveTab('transactions')}><div><b>{transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {financeState.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id) ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : 'negative'}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></button>)}</div></section>
+        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <button type="button" className="recent-row" key={transaction.id} onClick={() => transaction.kind === 'transfer' && !transaction.analysisExcluded ? setTransferDetailTransaction(transaction) : setActiveTab('transactions')}><div><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {financeState.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id) ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : 'negative'}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></button>)}</div></section>
 
         {primaryImpactInsight && <section className="home-insights"><div className="section-heading"><div><span className="eyebrow">PRIORIDADE</span><h2>O que pode mudar uma decisão</h2></div><button type="button" className="link-button" onClick={() => { setDiscoveriesView(primaryImpactInsight.group); setActiveTab('discoveries'); }}>Ver todas</button></div><ImpactInsightCard insight={primaryImpactInsight} compact onAction={openImpactAction} /></section>}
 
@@ -1530,10 +1572,10 @@ function FinanceApp({ session }: { session: Session }) {
       </section>}
 
       {activeTab === 'discoveries' && <section className="discoveries-page">
-        <span className="eyebrow">DESCOBERTAS</span>
+        <span className="eyebrow">INSIGHTS</span>
         <h1>Contexto que<br />leva a uma ação.</h1>
-        <p>Primeiro vêm riscos e oportunidades. Curiosidades continuam existindo, porque números também gostam de conversa fiada, mas agora ficam no lugar certo.</p>
-        <nav className="discoveries-tabs" aria-label="Tipos de descobertas"><button type="button" className={discoveriesView === 'now' ? 'active' : ''} onClick={() => setDiscoveriesView('now')}>Agora <span>{nowImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'opportunity' ? 'active' : ''} onClick={() => setDiscoveriesView('opportunity')}>Oportunidades <span>{opportunityImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'patterns' ? 'active' : ''} onClick={() => setDiscoveriesView('patterns')}>Padrões <span>{insightResult.insights.length}</span></button></nav>
+        <p>Um insight só aparece quando muda uma decisão ou aumenta de verdade a compreensão. O óbvio não ganha cartão só porque veio acompanhado de porcentagem.</p>
+        <nav className="discoveries-tabs" aria-label="Tipos de insights"><button type="button" className={discoveriesView === 'now' ? 'active' : ''} onClick={() => setDiscoveriesView('now')}>Agora <span>{nowImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'opportunity' ? 'active' : ''} onClick={() => setDiscoveriesView('opportunity')}>Oportunidades <span>{opportunityImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'patterns' ? 'active' : ''} onClick={() => setDiscoveriesView('patterns')}>Padrões <span>{insightResult.insights.length}</span></button></nav>
 
         {discoveriesView === 'now' && <div className="impact-stack">{nowImpactInsights.length ? nowImpactInsights.map((insight) => <ImpactInsightCard key={insight.id} insight={insight} onAction={openImpactAction} />) : <section className="panel empty compact-empty"><BadgeCheck size={30} /><p>Nenhuma ação urgente identificada com os dados atuais.</p></section>}</div>}
 
@@ -1564,19 +1606,44 @@ function FinanceApp({ session }: { session: Session }) {
 
         <section className="currency-overview"><div className="section-heading"><div><span className="eyebrow">POSIÇÃO POR MOEDA</span><h2>Saldo consolidado sem esconder as contas</h2></div></div>{allCurrencyPositions.map((position) => <article key={position.currency}><header><div><small>{position.currency}</small><strong>{position.currentBalanceCents !== undefined ? formatMoney(position.currentBalanceCents, position.currency) : 'saldo incompleto'}</strong></div><span className={`balance-confidence ${position.confidence}`}>{position.confidence === 'confirmed' ? 'Confirmado' : position.confidence === 'estimated' ? 'Estimado' : position.confidence === 'stale' ? 'Desatualizado' : 'Precisa confirmar'}</span></header><div>{position.positions.map((accountPosition) => <span key={accountPosition.account.id}><small>{accountPosition.account.name} · {institutionName(accountPosition.account.institution)}</small><b>{accountPosition.currentBalanceCents !== undefined ? formatMoney(accountPosition.currentBalanceCents, position.currency) : 'não informado'}</b></span>)}</div></article>)}</section>
 
-        <section className="panel institution-summary"><div className="panel-title"><div><small>INSTITUIÇÕES · {currency}</small><h2>Wise e Revolut separadas</h2></div><Building2 size={20} /></div>{currencyAnalytics.institutions.length ? <div className="institution-list">{currencyAnalytics.institutions.map((summary) => <article key={summary.institution}><header><b>{institutionName(summary.institution)}</b><small>{summary.accountCount} {summary.accountCount === 1 ? 'conta' : 'contas'} · {summary.transactionCount} movimentos</small></header><div><span><small>Entrou</small><b className="positive">{formatMoney(summary.inflowCents, currency)}</b></span><span><small>Saiu</small><b>{formatMoney(summary.outflowCents, currency)}</b></span><span><small>Taxas</small><b className="negative">{formatMoney(summary.feeCents, currency)}</b></span><span><small>Conversões</small><b>{summary.conversionCount}</b></span></div></article>)}</div> : <p className="muted">Nenhuma movimentação encontrada nesta moeda.</p>}</section>
+        <section className="panel institution-summary"><div className="panel-title"><div><small>INSTITUIÇÕES · {currency}</small><h2>Wise e Revolut separadas</h2></div><Building2 size={20} /></div>{currencyAnalytics.institutions.length ? <div className="institution-list">{currencyAnalytics.institutions.map((summary) => <article key={summary.institution}><header><b>{institutionName(summary.institution)}</b><small>{summary.accountCount} {summary.accountCount === 1 ? 'conta' : 'contas'} · {summary.transactionCount} movimentos</small></header><div><span><small>Entradas externas</small><b className="positive">{formatMoney(summary.externalInflowCents, currency)}</b></span><span><small>Saídas externas</small><b>{formatMoney(summary.externalOutflowCents, currency)}</b></span><span><small>Movimentos internos</small><b>{formatMoney(summary.internalMovementCents, currency)}</b></span><span><small>Taxas</small><b className="negative">{formatMoney(summary.feeCents, currency)}</b></span></div></article>)}</div> : <p className="muted">Nenhuma movimentação encontrada nesta moeda.</p>}</section>
 
-        <section className="panel fx-panel"><div className="panel-title"><div><small>MOEDAS E CÂMBIO</small><h2>Conversões e custo explícito</h2></div><ArrowLeftRight size={20} /></div><div className="fx-summary"><span><small>Volume convertido em {currency}</small><b>{formatMoney(currencyAnalytics.convertedOutflowCents, currency)}</b></span><span><small>Taxas explícitas</small><b className="negative">{formatMoney(currencyAnalytics.explicitFeeCents, currency)}</b></span><span><small>Conversões identificadas</small><b>{currencyAnalytics.conversionCount}</b></span><span><small>Sem par vinculado</small><b>{unpairedConversionCount}</b></span></div>{currencyAnalytics.effectiveConversions.length > 0 && <div className="conversion-list">{currencyAnalytics.effectiveConversions.slice(0, 6).map((conversion) => <article key={conversion.groupId}><div><b>{conversion.sourceCurrency} → {conversion.targetCurrency}</b><small>{formatReportingDate(conversion.reportingDate)} · {institutionName(conversion.institution)}</small></div><span><strong>{formatMoney(conversion.sourceAmountCents, conversion.sourceCurrency)} → {formatMoney(conversion.targetAmountCents, conversion.targetCurrency)}</strong><small>câmbio efetivo {conversion.effectiveRate.toFixed(4).replace('.', ',')} · taxa {formatMoney(conversion.explicitFeeCents, conversion.sourceCurrency)}</small></span></article>)}</div>}<p className="muted">O custo explícito vem do extrato. Spread contra o mercado exige uma referência histórica externa e, por isso, não é inventado nesta versão.</p></section>
+        <section className="panel fx-panel"><div className="panel-title"><div><small>MOEDAS E CÂMBIO</small><h2>Conversões e custo explícito</h2></div><ArrowLeftRight size={20} /></div><div className="fx-summary"><span><small>Volume convertido em {currency}</small><b>{formatMoney(currencyAnalytics.convertedOutflowCents, currency)}</b></span><span><small>Taxas explícitas</small><b className="negative">{formatMoney(currencyAnalytics.explicitFeeCents, currency)}</b></span><span><small>Conversões identificadas</small><b>{currencyAnalytics.conversionCount}</b></span><span><small>Vínculos de conversão</small><b>{unpairedConversionCount === 0 ? 'Todos vinculados ✓' : `${unpairedConversionCount} sem par`}</b></span></div>{currencyAnalytics.effectiveConversions.length > 0 && <div className="conversion-list">{currencyAnalytics.effectiveConversions.slice(0, 6).map((conversion) => <article key={conversion.groupId}><div><b>{conversion.sourceCurrency} → {conversion.targetCurrency}</b><small>{formatReportingDate(conversion.reportingDate)} · {institutionName(conversion.institution)}</small></div><span><strong>{formatMoney(conversion.sourceAmountCents, conversion.sourceCurrency)} → {formatMoney(conversion.targetAmountCents, conversion.targetCurrency)}</strong><small>câmbio efetivo {conversion.effectiveRate.toFixed(4).replace('.', ',')} · taxa {formatMoney(conversion.explicitFeeCents, conversion.sourceCurrency)}</small></span></article>)}</div>}<p className="muted">O custo explícito vem do extrato. Spread contra o mercado exige uma referência histórica externa e, por isso, não é inventado nesta versão.</p></section>
 
         <section className="panel integrity-panel"><div className="panel-title"><div><small>INTEGRIDADE VISÍVEL</small><h2>Quanto o aplicativo realmente sabe</h2></div><ShieldCheck size={20} /></div><div className="integrity-grid"><span><small>Saldo</small><b>{balanceConfidenceLabel}</b></span><span><small>Histórico disponível</small><b>{currencyHistoryStart && currencyHistoryEnd ? `${formatReportingDate(currencyHistoryStart)} a ${formatReportingDate(currencyHistoryEnd)}` : 'sem dados'}</b></span><span><small>Pendências críticas</small><b>{criticalPendingCount}</b></span><span><small>Pares internos sugeridos</small><b>{internalTransferSuggestions.length}</b></span><span><small>Conversões sem par</small><b>{unpairedConversionCount}</b></span><span><small>Detalhamentos</small><b>{financeState.transactionAllocations.filter((allocation) => financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)).length}</b></span></div></section>
 
-        <div className="import-card"><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>Importar para {account.name} · {institutionName(account.institution)}</option>)}</select><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato</button><small>CSV Revolut/Wise é detectado e separado automaticamente por instituição e moeda. A conta escolhida serve apenas como preferência para PDF ou arquivo sem moeda explícita.</small></div>
-        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <div className="import-card"><label className="import-fallback-label"><span>Destino de apoio para arquivos genéricos</span><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>{account.name} · {institutionName(account.institution)}</option>)}</select></label><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato bancário</button><small>Wise e Revolut são detectados e separados automaticamente por instituição, moeda e produto. O destino acima só é usado quando o arquivo realmente não traz essa informação.</small></div>
+        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => setActiveTab('health')}><ShieldCheck size={18} /> Saúde da base ({healthReport.score})</button><button type="button" className="secondary" onClick={() => setActiveTab('memory')}><Layers3 size={18} /> Memória financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={18} /> Auditoria inteligente</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
         <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{(batch.accountIds?.length ?? 1) > 1 ? `${batch.accountIds!.length} contas` : accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
         <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
       </section>}
 
-      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 && transferRecurrenceSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
+      {activeTab === 'health' && <DataHealthPanel report={healthReport} onOpenReview={() => setActiveTab('review')} onReprocess={() => {
+        const proposal = buildDeterministicAuditProposals(financeState).find((item) => item.payload.action === 'reprocess_all');
+        if (!proposal) { setError('Nenhuma classificação automática precisa ser atualizada.'); return; }
+        setPendingAuditProposal(proposal);
+      }} />}
+
+      {activeTab === 'memory' && <FinancialMemoryPanel state={financeState} suggestions={memorySuggestions} create={(input) => {
+        createCheckpoint(userId, financeState, `Antes de ensinar ${input.displayName}`);
+        const entity = createMemoryEntity({ displayName: input.displayName, aliases: [input.alias], type: input.type as FinancialEntityType, relationship: input.relationship as FinancialEntityRelationship, contextLabel: input.contextLabel, categoryId: input.categoryId, direction: input.direction, validFrom: input.validFrom, validUntil: input.validUntil, source: 'confirmed_suggestion' });
+        setState(reprocessFinancialState({ ...financeState, financialMemory: [...financeState.financialMemory, entity] }));
+      }} remove={(id) => { createCheckpoint(userId, financeState, 'Antes de remover memória financeira'); setState(reprocessFinancialState({ ...financeState, financialMemory: financeState.financialMemory.filter((item) => item.id !== id), transactions: financeState.transactions.map((item) => item.counterpartyEntityId === id ? { ...item, counterpartyEntityId: undefined } : item) })); }} />}
+
+      {activeTab === 'ai' && <AiAuditPanel proposals={financeState.auditProposals} runs={financeState.aiAuditRuns} busy={aiAuditBusy} runLocal={() => {
+        const proposals = buildDeterministicAuditProposals(financeState);
+        setState({ ...financeState, auditProposals: [...proposals, ...financeState.auditProposals.filter((item) => item.status !== 'pending')] });
+      }} runAi={async (options) => {
+        setAiAuditBusy(true); setError('');
+        try {
+          const result = await requestAiFinancialAudit(financeState, options);
+          const run = createAiAuditRun(financeState, result);
+          setState({ ...financeState, auditProposals: [...result.proposals, ...financeState.auditProposals], aiAuditRuns: [run, ...financeState.aiAuditRuns] });
+        } catch (caught) { setError(caught instanceof Error ? caught.message : 'Não foi possível executar a auditoria.'); }
+        finally { setAiAuditBusy(false); }
+      }} apply={(proposal: AuditProposal) => setPendingAuditProposal(proposal)} dismiss={(proposal) => setState({ ...financeState, auditProposals: financeState.auditProposals.map((item) => item.id === proposal.id ? { ...item, status: 'dismissed', resolvedAt: new Date().toISOString() } : item) })} />}
+
+      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-summary-grid"><article className={criticalPendingCount ? 'attention' : ''}><small>Corrigir dados</small><b>{criticalPendingCount}</b><span>Afeta cálculo ou integridade</span></article><article><small>Confirmar vínculos</small><b>{internalTransferSuggestions.length}</b><span>Contas próprias e conversões</span></article><article><small>Ensinar contexto</small><b>{memorySuggestions.length}</b><span>Pessoas e padrões recorrentes</span></article><article><small>Organizar categorias</small><b>{pendingReviewGroupCount}</b><span>Opcional, não trava o fluxo</span></article></div><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 && transferRecurrenceSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
         <TransferRecurrencePanel suggestions={transferRecurrenceSuggestions} categories={financeState.categories} apply={applyRecurrencePurpose} />
         <ReviewGroupsPanel groups={currencyReviewGroups} transactions={visibleTransactions} categories={financeState.categories} apply={applyReviewGroup} resolveWithoutCategory={resolveReviewGroupWithoutCategory} defer={postponeReviewGroup} reopen={reactivateReviewGroup} applyOne={applyReviewException} />
         {eventsNeedingAccountReview.length > 0 && <section className="panel issues"><h3>Eventos sem conta</h3><p>Escolha a conta para reativá-los no forecast ou exclua o evento.</p>{eventsNeedingAccountReview.map((item) => <article key={item.id}><div className="issue-heading"><b>{item.title}</b><button type="button" className="icon-button tiny" title={`Excluir ${item.title}`} aria-label={`Excluir compromisso ${item.title}`} onClick={() => deletePlannedEvent(item.id)}><Trash2 size={15} /></button></div><p>{item.dueDate} · {formatMoney(item.amountCents, item.currency)}</p><label>Conta<select aria-label={`Conta para ${item.title}`} defaultValue="" onChange={(event) => event.target.value && resolvePlannedEventAccount(item.id, event.target.value)}><option value="">Selecionar conta</option>{activeAccounts.filter((account) => account.currency === item.currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label></article>)}</section>}
@@ -1586,12 +1653,36 @@ function FinanceApp({ session }: { session: Session }) {
 
       <input ref={input} hidden type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && onFile(event.target.files[0])} />
       <input ref={backupInput} hidden type="file" accept=".json,application/json" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && restoreBackup(event.target.files[0])} />
-      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' || activeTab === 'assistant' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={activeTab === 'discoveries' ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Descobertas</span></button><button type="button" className={activeTab === 'accounts' || activeTab === 'review' ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
+      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={['discoveries','assistant','ai'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Insights</span></button><button type="button" className={['accounts','review','health','memory'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
 
       {syncConflict && <SyncConflictModal conflict={syncConflict} busy={conflictBusy} message={error} exportLocal={() => exportState(syncConflict.localState)} keepLocal={keepLocalConflictVersion} useRemote={useRemoteConflictVersion} />}
       {preview && <ImportPreview preview={preview} includePossibleDuplicates={includePossibleDuplicates} setIncludePossibleDuplicates={setIncludePossibleDuplicates} allowPartial={allowPartial} setAllowPartial={setAllowPartial} close={() => setPreview(null)} confirm={confirmImport} />}
       {manualOpen && <ManualModal accounts={activeAccounts} categories={financeState.categories} close={() => setManualOpen(false)} add={(transaction) => { createCheckpoint(userId, financeState, 'Antes de transação manual'); setState(withRebuiltReviewGroups({ ...financeState, transactions: [transaction, ...financeState.transactions] })); setManualOpen(false); }} />}
-      {accountOpen && <AccountModal accounts={financeState.accounts} close={() => setAccountOpen(false)} activate={(accountId) => { createCheckpoint(userId, financeState, `Antes de ativar conta ${accountName(accountId)}`); setState({ ...financeState, accounts: financeState.accounts.map((account) => account.id === accountId ? { ...account, active: true } : account) }); }} save={(account) => { setState({ ...financeState, accounts: [...financeState.accounts, account] }); setAccountOpen(false); }} />}
+      {accountOpen && <AccountModal
+        accounts={financeState.accounts}
+        referenceCounts={Object.fromEntries(financeState.accounts.map((account) => [account.id, countAccountReferences(financeState, account.id)]))}
+        close={() => setAccountOpen(false)}
+        save={(account) => {
+          createCheckpoint(userId, financeState, `Antes de criar conta ${account.name}`);
+          setState({ ...financeState, accounts: [...financeState.accounts, account] });
+        }}
+        rename={(accountId, name) => {
+          createCheckpoint(userId, financeState, `Antes de renomear conta ${accountName(accountId)}`);
+          setState(renameManagedAccount(financeState, accountId, name));
+        }}
+        archive={(accountId, archived) => {
+          createCheckpoint(userId, financeState, `Antes de ${archived ? 'arquivar' : 'reativar'} conta ${accountName(accountId)}`);
+          setState(setAccountArchived(financeState, accountId, archived));
+        }}
+        remove={(accountId) => {
+          createCheckpoint(userId, financeState, `Antes de excluir conta ${accountName(accountId)}`);
+          setState(deleteEmptyAccount(financeState, accountId));
+        }}
+        merge={(sourceId, targetId) => {
+          createCheckpoint(userId, financeState, `Antes de mesclar ${accountName(sourceId)} em ${accountName(targetId)}`);
+          setState(reprocessFinancialState(mergeAccounts(financeState, sourceId, targetId)));
+        }}
+      />}
       {identityOpen && <IdentityProfileModal profile={financeState.ownerIdentity} accounts={financeState.accounts} close={() => setIdentityOpen(false)} save={saveIdentityProfile} />}
       {reconciliationOpen && <ReconciliationModal accounts={activeAccounts.filter((account) => account.currency === currency)} currency={currency} close={() => setReconciliationOpen(false)} confirm={confirmReconciliation} />}
       {reserveOpen && <ReserveModal currency={currency} policy={reservePolicy} close={() => setReserveOpen(false)} save={(policy) => { setState({ ...financeState, reservePolicies: [...financeState.reservePolicies.filter((item) => item.currency !== currency), policy] }); setReserveOpen(false); }} />}
@@ -1599,6 +1690,17 @@ function FinanceApp({ session }: { session: Session }) {
       {categoryOpen && <CategoryManagerModal categories={financeState.categories} rules={financeState.rules} transactionCountByCategory={transactionCountByCategory} close={() => setCategoryOpen(false)} create={createCategory} rename={renameCategory} archive={archiveCategory} restore={restoreCategory} removeRule={removeCategoryRule} />}
       {merchantLearning && <MerchantLearningModal transaction={merchantLearning.transaction} category={merchantLearning.category} close={() => setMerchantLearning(null)} remember={rememberMerchantRule} />}
       {bulkRuleOpen && <BulkRuleModal candidates={filtered} categories={financeState.categories} currency={currency} close={() => setBulkRuleOpen(false)} apply={applyBulkRule} />}
+      {transactionSheet && <TransactionDetailsSheet transaction={transactionSheet} account={financeState.accounts.find((item) => item.id === transactionSheet.accountId)} category={financeState.categories.find((item) => item.id === transactionSheet.categoryId)} close={() => setTransactionSheet(null)} />}
+      {pendingAuditProposal && <AuditProposalConfirmModal proposal={pendingAuditProposal} preview={previewAuditProposal(financeState, pendingAuditProposal)} close={() => setPendingAuditProposal(null)} confirm={() => {
+        try {
+          createCheckpoint(userId, financeState, `Antes de aplicar auditoria: ${pendingAuditProposal.title}`);
+          setState(applyAuditProposal(financeState, pendingAuditProposal));
+          setPendingAuditProposal(null);
+          setError('');
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : 'Não foi possível aplicar a correção proposta.');
+        }
+      }} />}
       {transferDetailTransaction && <TransferDetailModal transaction={transferDetailTransaction} allocations={financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transferDetailTransaction.id)} categories={financeState.categories} close={() => setTransferDetailTransaction(null)} save={saveTransferDetail} />}
     </main>
   );
@@ -1739,7 +1841,7 @@ function ImportPreview({ preview, includePossibleDuplicates, setIncludePossibleD
     <div className="preview-explainer"><b>O que o app entendeu</b><p>Transferências internas e conversões ficam fora do fluxo. Transferências externas contam pela direção, e reembolsos reduzem as saídas. O que continuar ambíguo será perguntado depois, sem sumir discretamente num porão contábil.</p></div>
     {preview.destinations && <div className="preview-destinations">{preview.destinations.map((destination) => <article key={destination.account.id}><div><b>{destination.account.name}</b><small>{destination.account.institution === 'wise' ? 'Wise' : 'Revolut'} · {destination.currency}{destination.created ? ' · nova conta' : ''}</small></div><strong>{destination.transactionCount} movimentações</strong></article>)}</div>}
     <div className="preview-smart-grid"><div><b>{technicallyIdentified}</b><small>tipos identificados</small></div><div><b>{internalTransfers}</b><small>internas ou conversões</small></div><div><b>{refunds}</b><small>reembolsos</small></div><div><b>{withoutCategory}</b><small>para revisar em grupos</small></div></div>
-    <div className="preview-grid"><div><b>{preview.newTransactions.length}</b><small>novas</small></div><div><b>{preview.confirmedDuplicateIds.length}</b><small>duplicatas certas</small></div><div><b>{preview.possibleDuplicates.length}</b><small>possíveis</small></div><div><b>{preview.issues.length}</b><small>pendências técnicas</small></div></div>
+    <div className="preview-grid"><div><b>{preview.newTransactions.length}</b><small>novas</small></div><div><b>{preview.updates.length}</b><small>atualizadas</small></div><div><b>{preview.confirmedDuplicateIds.length}</b><small>duplicatas certas</small></div><div><b>{preview.possibleDuplicates.length}</b><small>possíveis</small></div><div><b>{preview.issues.length}</b><small>pendências técnicas</small></div></div>
     {preview.currencies.map((item) => <div className={`reconciliation ${item.reconciliation}`} key={item.key}><b>{item.label}</b><span>Entradas {formatMoney(item.inflowCents, item.currency)}</span><span>Saídas {formatMoney(item.outflowCents, item.currency)}</span><span>{item.reconciliation === 'reconciled' ? 'Livro de saldo reconciliado' : item.reconciliation === 'mismatch' ? `Diferença ${formatMoney(item.reconciliationDifferenceCents ?? 0, item.currency)}` : 'Livro sem saldo suficiente para reconciliar'}</span></div>)}
     {preview.issues.length > 0 && <details open><summary>Linhas que exigem atenção</summary>{preview.issues.slice(0, 12).map((item) => <p key={item.id}>• {item.message}</p>)}</details>}
     {preview.possibleDuplicates.length > 0 && <label className="duplicate-choice"><input type="checkbox" checked={includePossibleDuplicates} onChange={(event) => setIncludePossibleDuplicates(event.target.checked)} /><span>Importar também as possíveis duplicatas. Elas continuarão marcadas para revisão.</span></label>}
@@ -1832,28 +1934,87 @@ function ManualModal({ accounts, categories, close, add }: { accounts: Account[]
   </form></div>;
 }
 
-function AccountModal({ accounts, close, save, activate }: { accounts: Account[]; close: () => void; save: (account: Account) => void; activate: (accountId: string) => void }) {
+function AccountModal({ accounts, referenceCounts, close, save, rename, archive, remove, merge }: {
+  accounts: Account[];
+  referenceCounts: Record<string, ReturnType<typeof countAccountReferences>>;
+  close: () => void;
+  save: (account: Account) => void;
+  rename: (accountId: string, name: string) => void;
+  archive: (accountId: string, archived: boolean) => void;
+  remove: (accountId: string) => void;
+  merge: (sourceId: string, targetId: string) => void;
+}) {
   const [name, setName] = useState('');
   const [currency, setCurrency] = useState('EUR');
   const [institution, setInstitution] = useState<Account['institution']>('cash');
+  const [product, setProduct] = useState('');
+  const [editingId, setEditingId] = useState('');
+  const [editingName, setEditingName] = useState('');
+  const [mergeSourceId, setMergeSourceId] = useState('');
+  const [mergeTargetId, setMergeTargetId] = useState('');
   const [error, setError] = useState('');
+
+  function protect(action: () => void) {
+    try {
+      action();
+      setError('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Não foi possível concluir a ação.');
+    }
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    const cleanName = name.trim();
-    const cleanCurrency = currency.trim().toUpperCase();
-    if (!cleanName) {
-      setError('Informe um nome para a conta.');
-      return;
-    }
-    if (!/^[A-Z]{3}$/.test(cleanCurrency)) {
-      setError('A moeda deve ter três letras, como EUR ou BRL.');
-      return;
-    }
-    const id = `${institution}-${cleanCurrency.toLowerCase()}-${crypto.randomUUID().slice(0, 6)}`;
-    save({ id, name: cleanName, currency: cleanCurrency, institution, active: true });
+    protect(() => {
+      const account = createManualAccount({ name, currency, institution, product });
+      save(account);
+      setName('');
+      setProduct('');
+    });
   }
-  return <div className="modal-bg"><form className="modal" onSubmit={submit}><button type="button" className="close" onClick={close}><X size={17} /></button><span className="eyebrow">CONTAS</span><h2>Gerenciar contas</h2><div className="account-manager-list">{accounts.map((account) => <article key={account.id}><div><b>{account.name}</b><small>{account.currency} · {account.institution === 'revolut' ? 'Revolut' : account.institution === 'wise' ? 'Wise' : account.institution}</small></div>{account.active ? <span>Ativa</span> : <button type="button" className="secondary" onClick={() => activate(account.id)}>Ativar</button>}</article>)}</div><h3>Adicionar outra conta</h3>
-    <label>Nome<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Wise EUR" /></label><div className="form-grid"><label>Moeda<input required maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value)} /></label><label>Instituição<select value={institution} onChange={(event) => setInstitution(event.target.value as Account['institution'])}><option value="cash">Dinheiro físico</option><option value="other">Outra</option><option value="revolut">Revolut</option><option value="wise">Wise</option></select></label></div>{error && <div className="form-message error">{error}</div>}<footer><button type="button" className="secondary" onClick={close}>Fechar</button><button type="submit">Criar conta</button></footer>
+
+  const mergeSource = accounts.find((account) => account.id === mergeSourceId);
+  const mergeTargets = accounts.filter((account) => account.id !== mergeSourceId && (!mergeSource || account.currency === mergeSource.currency));
+
+  return <div className="modal-bg"><form className="modal account-manager-modal" onSubmit={submit}>
+    <button type="button" className="close" onClick={close}><X size={17} /></button>
+    <span className="eyebrow">CONTAS E PRODUTOS</span><h2>Gerenciar livros bancários</h2>
+    <p className="muted">Cada produto mantém saldo próprio. O consolidado da instituição continua disponível sem transformar Poupanças em conta corrente por pura conveniência administrativa.</p>
+    <div className="account-manager-list">{accounts.map((account) => {
+      const counts = referenceCounts[account.id];
+      const totalReferences = counts ? Object.values(counts).reduce((total, count) => total + count, 0) : 0;
+      const editing = editingId === account.id;
+      return <article key={account.id} className={!account.active ? 'archived' : ''}>
+        <div className="account-manager-main">
+          {editing ? <input autoFocus value={editingName} onChange={(event) => setEditingName(event.target.value)} /> : <b>{account.name}</b>}
+          <small>{account.currency} · {account.institution === 'revolut' ? 'Revolut' : account.institution === 'wise' ? 'Wise' : account.institution}{account.product ? ` · ${account.product}` : ''} · {totalReferences} vínculos</small>
+        </div>
+        <div className="account-manager-actions">
+          {editing ? <>
+            <button type="button" onClick={() => protect(() => { rename(account.id, editingName); setEditingId(''); })}>Salvar</button>
+            <button type="button" className="secondary" onClick={() => setEditingId('')}>Cancelar</button>
+          </> : <button type="button" className="secondary" onClick={() => { setEditingId(account.id); setEditingName(account.name); }}>Renomear</button>}
+          <button type="button" className="secondary" onClick={() => protect(() => archive(account.id, account.active))}>{account.active ? 'Arquivar' : 'Reativar'}</button>
+          {totalReferences === 0 && <button type="button" className="danger" onClick={() => protect(() => remove(account.id))}>Excluir</button>}
+        </div>
+      </article>;
+    })}</div>
+
+    {accounts.length > 1 && <section className="account-merge-box">
+      <h3>Mesclar conta criada incorretamente</h3>
+      <p className="muted">Todos os movimentos, posições, importações e planejamentos serão transferidos para o destino. Só contas da mesma moeda aparecem como opção.</p>
+      <div className="form-grid">
+        <label>Conta de origem<select value={mergeSourceId} onChange={(event) => { setMergeSourceId(event.target.value); setMergeTargetId(''); }}><option value="">Escolha</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
+        <label>Conta de destino<select value={mergeTargetId} disabled={!mergeSourceId} onChange={(event) => setMergeTargetId(event.target.value)}><option value="">Escolha</option>{mergeTargets.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
+      </div>
+      <button type="button" className="secondary" disabled={!mergeSourceId || !mergeTargetId} onClick={() => protect(() => { merge(mergeSourceId, mergeTargetId); setMergeSourceId(''); setMergeTargetId(''); })}>Mesclar com prévia protegida por checkpoint</button>
+    </section>}
+
+    <h3>Adicionar outro livro</h3>
+    <label>Nome<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Wise EUR Rende+" /></label>
+    <div className="form-grid"><label>Moeda<input required maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value)} /></label><label>Instituição<select value={institution} onChange={(event) => setInstitution(event.target.value as Account['institution'])}><option value="cash">Dinheiro físico</option><option value="other">Outra</option><option value="revolut">Revolut</option><option value="wise">Wise</option></select></label></div>
+    <label>Produto opcional<input value={product} onChange={(event) => setProduct(event.target.value)} placeholder="Atual, Poupanças, Conta principal..." /></label>
+    {error && <div className="form-message error">{error}</div>}
+    <footer><button type="button" className="secondary" onClick={close}>Fechar</button><button type="submit">Criar conta</button></footer>
   </form></div>;
 }
-

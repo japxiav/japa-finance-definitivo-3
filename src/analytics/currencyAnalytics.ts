@@ -8,6 +8,9 @@ export interface InstitutionCurrencySummary {
   transactionCount: number;
   inflowCents: number;
   outflowCents: number;
+  externalInflowCents: number;
+  externalOutflowCents: number;
+  internalMovementCents: number;
   feeCents: number;
   conversionCount: number;
   convertedOutflowCents: number;
@@ -51,6 +54,9 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
       transactionCount: 0,
       inflowCents: 0,
       outflowCents: 0,
+      externalInflowCents: 0,
+      externalOutflowCents: 0,
+      internalMovementCents: 0,
       feeCents: 0,
       conversionCount: 0,
       convertedOutflowCents: 0,
@@ -58,6 +64,7 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
     map.set(institution, current);
     return current;
   };
+  const explicitFeeCompounds = new Set(state.transactions.filter((item) => item.status === 'completed' && item.technicalType === 'bank_fee' && item.compoundEventId).map((item) => item.compoundEventId!));
   const transactions = state.transactions.filter((transaction) =>
     transaction.status === 'completed' && transaction.currency === currency);
   for (const transaction of transactions) {
@@ -66,10 +73,15 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
     summary.transactionCount += 1;
     if (movement > 0) summary.inflowCents = addCents(summary.inflowCents, movement);
     if (movement < 0) summary.outflowCents = addCents(summary.outflowCents, Math.abs(movement));
+    if (transaction.analysisExcluded || transaction.technicalType === 'internal_transfer' || transaction.technicalType === 'currency_conversion') {
+      summary.internalMovementCents = addCents(summary.internalMovementCents, Math.abs(movement));
+    } else if (movement > 0) summary.externalInflowCents = addCents(summary.externalInflowCents, movement);
+    else if (movement < 0) summary.externalOutflowCents = addCents(summary.externalOutflowCents, Math.abs(movement));
     if (transaction.technicalType === 'bank_fee') {
       summary.feeCents = addCents(summary.feeCents, Math.abs(movement));
     } else if (transaction.sourceComponent !== 'fee'
       && transaction.feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT'
+      && !explicitFeeCompounds.has(transaction.compoundEventId ?? '')
       && Number.isSafeInteger(transaction.feeCents)
       && (transaction.feeCents ?? 0) > 0) {
       // Wise já traz o movimento líquido. A taxa não vira outro lançamento
@@ -98,10 +110,12 @@ export function buildCurrencyAnalytics(state: AppState, currency: string): Curre
     const sourceAmountCents = Math.abs(signedNetMovement(source));
     const targetAmountCents = Math.abs(signedNetMovement(target));
     const feeParentIds = new Set(group.map((transaction) => transaction.id));
-    const separateFeeCents = state.transactions
-      .filter((transaction) => transaction.sourceComponent === 'fee' && transaction.feeOfTransactionId && feeParentIds.has(transaction.feeOfTransactionId))
-      .reduce((total, transaction) => addCents(total, Math.abs(signedNetMovement(transaction))), 0);
-    const includedFeeCents = group
+    const explicitFeeRows = state.transactions.filter((transaction) => transaction.status === 'completed'
+      && transaction.technicalType === 'bank_fee'
+      && ((transaction.sourceComponent === 'fee' && transaction.feeOfTransactionId && feeParentIds.has(transaction.feeOfTransactionId))
+        || (source.compoundEventId && transaction.compoundEventId === source.compoundEventId)));
+    const separateFeeCents = explicitFeeRows.reduce((total, transaction) => addCents(total, Math.abs(signedNetMovement(transaction))), 0);
+    const includedFeeCents = explicitFeeRows.length ? 0 : group
       .filter((transaction) => transaction.sourceComponent !== 'fee'
         && transaction.feeTreatment === 'INCLUDED_IN_REPORTED_AMOUNT'
         && Number.isSafeInteger(transaction.feeCents)
