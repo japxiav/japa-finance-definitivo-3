@@ -1,4 +1,4 @@
-const CACHE = 'japa-finance-shell-alpha6';
+const CACHE = 'japa-finance-shell-alpha8';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {

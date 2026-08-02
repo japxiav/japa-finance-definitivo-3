@@ -9,6 +9,9 @@ import { addCivilDays } from '../domain/dates';
 import { buildConsolidatedForecast } from '../domain/forecast';
 import type { CivilDate, DecisionEvidence, ForecastResult } from '../domain/model';
 import { adaptAppStateToFinancialState } from './appStateAdapter';
+import { buildFinancialRelationships, topRelationshipReceivers, topRelationshipSenders } from './financialRelationships';
+import { normalizeEntityAlias } from './financialMemory';
+import { buildCurrencyAnalytics } from '../analytics/currencyAnalytics';
 
 export interface AssistantResult {
   answer: string;
@@ -125,6 +128,56 @@ function incomplete(blockers: string[]): AssistantResult {
   return { answer: `Não consigo calcular com segurança: ${blockers.join(', ')}.`, confidence: 'low', evidence: blockers, status: 'incomplete' };
 }
 
+function relationshipMention(
+  question: string,
+  relationships: ReturnType<typeof buildFinancialRelationships>,
+): ReturnType<typeof buildFinancialRelationships>[number] | undefined {
+  const normalizedQuestion = normalizeEntityAlias(question);
+  const stop = new Set(['para', 'recebi', 'enviei', 'mandei', 'quanto', 'total', 'dinheiro', 'transferencia', 'transferência']);
+  const scored = relationships.flatMap((relationship) => {
+    const aliases = [...new Set([relationship.displayName, ...relationship.normalizedAliases])]
+      .map(normalizeEntityAlias)
+      .filter(Boolean);
+    let score = 0;
+    for (const alias of aliases) {
+      if (normalizedQuestion.includes(alias)) score = Math.max(score, 1_000 + alias.length);
+      for (const token of alias.split(' ')) {
+        if (token.length >= 4 && !stop.has(token) && normalizedQuestion.split(' ').includes(token)) {
+          score = Math.max(score, token.length);
+        }
+      }
+    }
+    return score > 0 ? [{ relationship, score }] : [];
+  }).sort((a, b) => b.score - a.score || b.relationship.displayName.length - a.relationship.displayName.length);
+  if (!scored.length) return undefined;
+  if (scored[1]?.score === scored[0]!.score && scored[1].relationship.key !== scored[0]!.relationship.key) return undefined;
+  return scored[0]!.relationship;
+}
+
+function institutionMention(question: string): 'revolut' | 'wise' | undefined {
+  const normalized = question.toLocaleLowerCase('pt-BR');
+  if (normalized.includes('revolut')) return 'revolut';
+  if (normalized.includes('wise')) return 'wise';
+  return undefined;
+}
+
+function merchantMention(question: string, appState: AppState, currency: string): string | undefined {
+  const normalizedQuestion = normalizeEntityAlias(question);
+  const candidates = [...new Set(appState.transactions
+    .filter((item) => item.status === 'completed'
+      && item.currency === currency
+      && ['card_payment', 'direct_debit', 'other_expense'].includes(item.technicalType))
+    .map((item) => item.merchantNormalized || item.friendlyDescription || item.descriptionOriginal)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3))];
+  return candidates
+    .filter((candidate) => {
+      const normalized = normalizeEntityAlias(candidate);
+      return normalized.length >= 3 && normalizedQuestion.includes(normalized);
+    })
+    .sort((a, b) => normalizeEntityAlias(b).length - normalizeEntityAlias(a).length)[0];
+}
+
 export class DefaultFinancialDecisionFacade implements FinancialDecisionFacade {
   buildForecast(input: { appState: AppState; currency: string; horizonStart: CivilDate; horizonEnd: CivilDate }) {
     const adapted = adaptAppStateToFinancialState(input.appState, input.currency);
@@ -231,6 +284,111 @@ export class DefaultFinancialDecisionFacade implements FinancialDecisionFacade {
   answerQuestion(input: { appState: AppState; currency: string; question: string; targetAccountId?: string; range?: { start?: string; end?: string }; today?: CivilDate }): AssistantResult {
     const clean = input.question.trim();
     if (!clean) return { answer: 'Escreva uma pergunta sobre seus números.', confidence: 'low', evidence: [] };
+    const normalized = clean.toLocaleLowerCase('pt-BR');
+    const relationships = buildFinancialRelationships(input.appState, input.currency, input.range);
+    const mentionedRelationship = relationshipMention(clean, relationships);
+
+    if (mentionedRelationship && /(quanto|total|mandei|enviei|transferi|recebi|veio|moviment)/i.test(clean)) {
+      const asksSent = /(mandei|enviei|transferi|paguei|para\s+)/i.test(clean) && !/(recebi|veio|de\s+)/i.test(clean);
+      const asksReceived = /(recebi|veio|mandou|enviou.*para mim|de\s+)/i.test(clean) && !/(mandei|enviei|transferi)/i.test(clean);
+      const amount = asksSent
+        ? mentionedRelationship.sentCents
+        : asksReceived
+          ? mentionedRelationship.receivedCents
+          : mentionedRelationship.sentCents + mentionedRelationship.receivedCents;
+      const directionLabel = asksSent ? 'enviado' : asksReceived ? 'recebido' : 'movimentado';
+      return {
+        answer: `${formatMoney(amount, input.currency)} ${directionLabel} com ${mentionedRelationship.displayName} no período analisado.`,
+        confidence: 'high',
+        evidence: [
+          `${mentionedRelationship.sentCount} transferências enviadas: ${formatMoney(mentionedRelationship.sentCents, input.currency)}.`,
+          `${mentionedRelationship.receivedCount} transferências recebidas: ${formatMoney(mentionedRelationship.receivedCents, input.currency)}.`,
+          `Período observado: ${mentionedRelationship.firstDate} a ${mentionedRelationship.lastDate}.`,
+        ],
+        amountCents: amount,
+        status: 'info',
+        dataScope: 'transferências reconhecidas por contraparte',
+      };
+    }
+
+    if (/quem.*(mais|maior).*(recebeu|mandei|enviei|transferi)/i.test(clean)) {
+      const top = topRelationshipSenders(relationships, 1)[0];
+      return top ? {
+        answer: `${top.displayName} foi quem mais recebeu transferências suas: ${formatMoney(top.sentCents, input.currency)} em ${top.sentCount} movimentos.`,
+        confidence: 'high',
+        evidence: [`${relationships.filter((item) => item.sentCents > 0).length} contrapartes com envios foram comparadas.`],
+        amountCents: top.sentCents,
+        status: 'info',
+        dataScope: 'transferências enviadas por pessoa',
+      } : { answer: 'Não encontrei transferências enviadas para pessoas nesta moeda.', confidence: 'high', evidence: [] };
+    }
+
+    if (/quem.*(mais|maior).*(me enviou|mandou|transferiu|recebi|veio)/i.test(clean)) {
+      const top = topRelationshipReceivers(relationships, 1)[0];
+      return top ? {
+        answer: `${top.displayName} foi quem mais enviou dinheiro para você: ${formatMoney(top.receivedCents, input.currency)} em ${top.receivedCount} movimentos.`,
+        confidence: 'high',
+        evidence: [`${relationships.filter((item) => item.receivedCents > 0).length} contrapartes com recebimentos foram comparadas.`],
+        amountCents: top.receivedCents,
+        status: 'info',
+        dataScope: 'transferências recebidas por pessoa',
+      } : { answer: 'Não encontrei transferências recebidas de pessoas nesta moeda.', confidence: 'high', evidence: [] };
+    }
+
+    const institution = institutionMention(clean);
+    if (institution && /(quando|comecei|primeiro|desde quando)/i.test(clean)) {
+      const accountIds = new Set(input.appState.accounts.filter((item) => item.institution === institution && item.currency === input.currency).map((item) => item.id));
+      const first = input.appState.transactions
+        .filter((item) => item.status === 'completed' && item.currency === input.currency && accountIds.has(item.accountId))
+        .sort((a, b) => a.reportingDate.localeCompare(b.reportingDate))[0];
+      const label = institution === 'revolut' ? 'Revolut' : 'Wise';
+      return first ? {
+        answer: `O primeiro movimento reconhecido na ${label} em ${input.currency} é de ${first.reportingDate}.`,
+        confidence: 'high',
+        evidence: [`${first.friendlyDescription ?? first.descriptionOriginal}.`, `Movimentação ${first.id}.`],
+        status: 'info',
+        dataScope: 'histórico bancário importado',
+      } : { answer: `Não encontrei movimentos da ${label} em ${input.currency}.`, confidence: 'high', evidence: [] };
+    }
+
+    if (/(taxa|taxas|comiss[aã]o).*(convers|câmbio|cambio)|quanto.*(perdi|paguei).*(convers|câmbio|cambio)/i.test(clean)) {
+      const fx = buildCurrencyAnalytics(input.appState, input.currency);
+      return {
+        answer: `As taxas explícitas reconhecidas em ${input.currency} somam ${formatMoney(fx.explicitFeeCents, input.currency)}.`,
+        confidence: 'high',
+        evidence: [`${fx.conversionCount} linhas de conversão reconhecidas.`, `${formatMoney(fx.convertedOutflowCents, input.currency)} de volume convertido saindo nesta moeda.`, 'O valor inclui somente taxas explícitas do extrato; spread de mercado não é inventado.'],
+        amountCents: fx.explicitFeeCents,
+        status: 'info',
+        dataScope: 'taxas explícitas e conversões do extrato',
+      };
+    }
+
+    const mentionedMerchant = merchantMention(clean, input.appState, input.currency);
+    if (mentionedMerchant && /(quanto|total|gastei|gasto|compras?|reembolso|líquido|liquido)/i.test(clean)) {
+      const normalizedMerchant = normalizeEntityAlias(mentionedMerchant);
+      const rows = input.appState.transactions.filter((item) => item.status === 'completed'
+        && item.currency === input.currency
+        && (!input.range?.start || item.reportingDate >= input.range.start)
+        && (!input.range?.end || item.reportingDate <= input.range.end)
+        && normalizeEntityAlias(item.merchantNormalized || item.friendlyDescription || item.descriptionOriginal).includes(normalizedMerchant));
+      const expenses = rows.filter((item) => !item.analysisExcluded
+        && ['card_payment', 'direct_debit', 'other_expense'].includes(item.technicalType)
+        && item.direction === 'outflow');
+      const refunds = rows.filter((item) => !item.analysisExcluded
+        && (item.kind === 'refund' || (item.direction === 'inflow' && item.technicalType === 'card_payment')));
+      const grossCents = expenses.reduce((sum, item) => addCents(sum, Math.abs(item.netMovementCents ?? item.amountCents)), 0);
+      const refundCents = refunds.reduce((sum, item) => addCents(sum, Math.abs(item.netMovementCents ?? item.amountCents)), 0);
+      const netCents = addCents(grossCents, -refundCents);
+      return {
+        answer: `Em ${mentionedMerchant}, as compras somam ${formatMoney(grossCents, input.currency)} e os reembolsos reconhecidos somam ${formatMoney(refundCents, input.currency)}. O impacto líquido é ${formatMoney(netCents, input.currency)}.`,
+        confidence: 'high',
+        evidence: [`${expenses.length} compra(s) e ${refunds.length} reembolso(s) no período.`, 'O resultado usa apenas movimentos concluídos e exclui transferências internas e conversões.'],
+        amountCents: netCents,
+        status: 'info',
+        dataScope: 'movimentações concluídas por comerciante',
+      };
+    }
+
     if (/duplicad/i.test(clean)) {
       const count = input.appState.importIssues.filter((item) => item.status === 'unresolved' && item.kind === 'possible_duplicate').length;
       return { answer: count ? `Há ${count} possível(is) duplicata(s) aguardando revisão.` : 'Não há possíveis duplicatas pendentes.', confidence: 'high', evidence: [`${count} pendência(s).`] };
@@ -282,9 +440,10 @@ export class DefaultFinancialDecisionFacade implements FinancialDecisionFacade {
         if (error instanceof MonetaryArithmeticError) return incomplete(['ARITHMETIC_OVERFLOW']);
         throw error;
       }
-      return { answer: `Total categorizado: ${formatMoney(total, input.currency)}.`, confidence: 'high', evidence: [`${byCategory.length} categoria(s).`], dataScope: 'histórico filtrado' };
+      const transferOutflow = relationships.reduce((sum, item) => sum + item.sentCents, 0);
+      return { answer: `Compras e despesas categorizadas somam ${formatMoney(total, input.currency)}. Transferências enviadas para pessoas somam ${formatMoney(transferOutflow, input.currency)} e aparecem separadas, sem exigir categoria.`, confidence: 'high', evidence: [`${byCategory.length} categoria(s) de compra/despesa.`, `${relationships.filter((item) => item.sentCents > 0).length} relacionamentos com envios.`], dataScope: 'histórico filtrado, separando consumo de transferências' };
     }
-    return { answer: 'Capacidades atuais: saldo reconciliado, gastos por categoria, duplicatas, limite até ao próximo pagamento e simulação de compra.', confidence: 'low', evidence: ['Intenção não reconhecida.'] };
+    return { answer: 'Consigo responder saldos, compras, limites, duplicatas, gastos por comerciante, taxas de conversão, uso de bancos e transferências por pessoa. Para interpretações mais abertas, use a análise por IA.', confidence: 'low', evidence: ['Intenção não reconhecida pelo motor determinístico.'] };
   }
 }
 

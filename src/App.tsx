@@ -15,7 +15,6 @@ import {
   MessageSquare,
   Landmark,
   TriangleAlert,
-  Send,
   Download,
   FileWarning,
   FileDown,
@@ -41,7 +40,7 @@ import {
 import { AuthScreen } from './auth/AuthScreen';
 import { UpdatePassword } from './auth/UpdatePassword';
 import { mergeImportedTransaction, previewSmartBankCsv, type Preview } from './core/csv';
-import { financialDecisionFacade, type AssistantResult } from './application/FinancialDecisionFacade';
+import { financialDecisionFacade } from './application/FinancialDecisionFacade';
 import { createReconciliationSnapshotBatch } from './application/reconciliation';
 import { previewRevolutPdf } from './core/pdf';
 import { formatReportingDate, localCivilDate, localDateTimeToInstant } from './core/date';
@@ -63,9 +62,10 @@ import { CategoryManagerModal } from './components/CategoryManagerModal';
 import { ReviewGroupsPanel } from './components/ReviewGroupsPanel';
 import { BulkRuleModal, type BulkRuleInput } from './components/BulkRuleModal';
 import { IdentityProfileModal } from './components/IdentityProfileModal';
-import { TransferRecurrencePanel } from './components/TransferRecurrencePanel';
 import { DataHealthPanel } from './components/DataHealthPanel';
-import { FinancialMemoryPanel } from './components/FinancialMemoryPanel';
+import { FinancialRelationshipsPanel } from './components/FinancialRelationshipsPanel';
+import { FinancialHistoryPanel } from './components/FinancialHistoryPanel';
+import { FinancialAnalystPanel } from './components/FinancialAnalystPanel';
 import { AiAuditPanel } from './components/AiAuditPanel';
 import { TransactionDetailsSheet } from './components/TransactionDetailsSheet';
 import { AuditProposalConfirmModal } from './components/AuditProposalConfirmModal';
@@ -74,7 +74,6 @@ import { formatMoney, parseSignedMoneyToCents } from './core/money';
 import { normalizeMerchant } from './core/merchant';
 import { buildActivityTimeline } from './application/activityTimeline';
 import { applyOwnerIdentityContext } from './application/ownerIdentity';
-import { applyPurposeToRecurrence, findTransferRecurrenceSuggestions, type TransferRecurrenceSuggestion } from './application/transferRecurrence';
 import { downloadContextDiagnostic } from './application/contextDiagnostic';
 import { deactivatePlannedEvent } from './application/plannedEvents';
 import { confirmInternalTransferSuggestion, findInternalTransferSuggestions, rejectInternalTransferSuggestion, type InternalTransferSuggestion } from './application/internalTransfers';
@@ -108,11 +107,8 @@ import type {
   ReviewReason,
   Transaction,
   TechnicalMovementType,
-  TransferPurpose,
   OwnerIdentityProfile,
   AuditProposal,
-  FinancialEntityRelationship,
-  FinancialEntityType,
 } from './core/types';
 import { initialState } from './data/defaults';
 import { applyCategoryDecision, deferReviewGroup, reopenReviewGroup, undoLatestReviewDecision } from './classification/decisions';
@@ -127,7 +123,11 @@ import {
 import { addCivilDays, civilDaysBetween, isCivilDate } from './domain/dates';
 import { buildTodayActivity } from './application/todayActivity';
 import { buildDataHealthReport } from './application/dataHealth';
-import { buildMemorySuggestions, createMemoryEntity } from './application/financialMemory';
+import { createMemoryEntity } from './application/financialMemory';
+import { buildFinancialRelationships, buildRelationshipTimeline, topRelationshipReceivers, topRelationshipSenders, type FinancialRelationshipSummary } from './application/financialRelationships';
+import { buildRelationshipIntelligence, buildRelationshipOverviewInsights } from './application/relationshipIntelligence';
+import { buildFinancialHistory, buildMonthlyFinancialStories } from './application/financialHistory';
+import { requestFinancialAnalyst } from './application/financialAnalystClient';
 import { reprocessFinancialState } from './application/reprocess';
 import { buildDeterministicAuditProposals, createAiAuditRun } from './application/smartAudit';
 import { requestAiFinancialAudit } from './application/aiClient';
@@ -302,6 +302,7 @@ function FinanceApp({ session }: { session: Session }) {
   const [includePossibleDuplicates, setIncludePossibleDuplicates] = useState(false);
   const [allowPartial, setAllowPartial] = useState(false);
   const [query, setQuery] = useState('');
+  const [relationshipFilter, setRelationshipFilter] = useState<{ name: string; transactionIds: string[] } | null>(null);
   const [month, setMonth] = useState('all');
   const [currency, setCurrency] = useState('EUR');
   const [accountFilter, setAccountFilter] = useState('all');
@@ -334,10 +335,8 @@ function FinanceApp({ session }: { session: Session }) {
   const [aiAuditBusy, setAiAuditBusy] = useState(false);
   const [pendingAuditProposal, setPendingAuditProposal] = useState<AuditProposal | null>(null);
   const [discoveriesView, setDiscoveriesView] = useState<'now' | 'opportunity' | 'patterns'>('now');
-  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'accounts' | 'review' | 'health' | 'memory' | 'ai'>('home');
-  const [assistantQuestion, setAssistantQuestion] = useState('');
+  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'history' | 'accounts' | 'review' | 'health' | 'relationships' | 'ai'>('home');
   const [assistantTargetAccountId, setAssistantTargetAccountId] = useState('');
-  const [assistantAnswer, setAssistantAnswer] = useState<AssistantResult | null>(null);
   const input = useRef<HTMLInputElement | null>(null);
   const backupInput = useRef<HTMLInputElement | null>(null);
   const hydrated = useRef(false);
@@ -534,7 +533,6 @@ function FinanceApp({ session }: { session: Session }) {
       setCurrency(availableCurrencies[0]);
       setAccountFilter('all');
       setAssistantTargetAccountId('');
-      setAssistantAnswer(null);
     }
     const importable = active.filter((account) => account.institution === 'revolut' || account.institution === 'wise');
     if (!importable.some((account) => account.id === importAccountId)) {
@@ -543,7 +541,6 @@ function FinanceApp({ session }: { session: Session }) {
     if (assistantTargetAccountId && !active.some((account) =>
       account.id === assistantTargetAccountId && account.currency === currency)) {
       setAssistantTargetAccountId('');
-      setAssistantAnswer(null);
     }
     if (accountFilter !== 'all' && !active.some((account) =>
       account.id === accountFilter && account.currency === currency)) {
@@ -584,7 +581,7 @@ function FinanceApp({ session }: { session: Session }) {
       ? { start: completedCurrencyDates[0]!, end: completedCurrencyDates.at(-1)! }
       : undefined
     : monthDateRange(month));
-  const filtered = filterTransactions(visibleTransactions, {
+  const filteredByControls = filterTransactions(visibleTransactions, {
     currency,
     query,
     accountId: accountFilter,
@@ -601,6 +598,10 @@ function FinanceApp({ session }: { session: Session }) {
     source: sourceFilter,
     reviewOnly,
   });
+  const relationshipTransactionIds = relationshipFilter ? new Set(relationshipFilter.transactionIds) : undefined;
+  const filtered = relationshipTransactionIds
+    ? filteredByControls.filter((transaction) => relationshipTransactionIds.has(transaction.id))
+    : filteredByControls;
   const analytics = buildAnalytics(financeState, currency, range);
   const insightResult = generateInsights(financeState, currency, range, { limit: 30 });
   const reservePolicy = financeState.reservePolicies.find((item) => item.currency === currency);
@@ -613,7 +614,6 @@ function FinanceApp({ session }: { session: Session }) {
   const freeMoneyPosition = buildFreeMoneyPosition(financeState, currencyPosition, today);
   const currencyAnalytics = buildCurrencyAnalytics(financeState, currency);
   const internalTransferSuggestions = findInternalTransferSuggestions(financeState, currency);
-  const transferRecurrenceSuggestions = findTransferRecurrenceSuggestions(financeState, currency);
   const impactInsights = buildImpactInsights({
     state: financeState,
     currency,
@@ -970,7 +970,7 @@ function FinanceApp({ session }: { session: Session }) {
         ...transaction,
         categoryId: destination.id,
         categorySource: 'manual' as const,
-        categoryReviewStatus: 'resolved' as const,
+        categoryReviewStatus: 'not_applicable' as const,
         updatedAt: now,
       } : transaction) : financeState.transactions,
       rules: destination ? financeState.rules.map((rule) => rule.categoryId === categoryId ? { ...rule, categoryId: destination.id, updatedAt: now } : rule) : financeState.rules,
@@ -1074,7 +1074,6 @@ function FinanceApp({ session }: { session: Session }) {
     if (insight.action === 'review') return setActiveTab('review');
     if (insight.action === 'accounts') return setActiveTab('accounts');
     if (insight.action === 'assistant') {
-      setAssistantQuestion('Quanto posso gastar até o pagamento?');
       return setActiveTab('assistant');
     }
     if (insight.action === 'categories') {
@@ -1112,21 +1111,64 @@ function FinanceApp({ session }: { session: Session }) {
     setState(rejectInternalTransferSuggestion(financeState, suggestion));
   }
 
-  function applyRecurrencePurpose(suggestion: TransferRecurrenceSuggestion, input: {
-    label: string;
-    purpose?: TransferPurpose;
-    categoryId?: string;
-    relatedPerson?: string;
-  }) {
-    createCheckpoint(userId, financeState, `Antes de detalhar grupo recorrente ${suggestion.recipientLabel}`);
-    setState(applyPurposeToRecurrence(financeState, suggestion, input));
-  }
 
   function saveIdentityProfile(profile: OwnerIdentityProfile) {
     createCheckpoint(userId, financeState, 'Antes de atualizar identidade própria');
     const transactions = financeState.transactions.map((transaction) => applyOwnerIdentityContext(transaction, profile));
     setState(withRebuiltReviewGroups({ ...financeState, ownerIdentity: profile, transactions }));
     setIdentityOpen(false);
+  }
+
+  function saveRelationshipNote(summary: FinancialRelationshipSummary, note?: string) {
+    if (!note?.trim() && !summary.memoryEntityId) return;
+    const now = new Date().toISOString();
+    createCheckpoint(userId, financeState, `Antes de atualizar anotação de ${summary.displayName}`);
+    const existing = summary.memoryEntityId
+      ? financeState.financialMemory.find((item) => item.id === summary.memoryEntityId)
+      : undefined;
+    const entity = existing ? {
+      ...existing,
+      displayName: summary.displayName,
+      normalizedAliases: [...new Set([...existing.normalizedAliases, ...summary.normalizedAliases])],
+      contextLabel: note,
+      notes: note,
+      updatedAt: now,
+    } : createMemoryEntity({
+      displayName: summary.displayName,
+      aliases: summary.normalizedAliases,
+      type: 'person',
+      relationship: 'unknown',
+      contextLabel: note,
+      notes: note,
+      source: 'manual',
+    });
+    const financialMemory = existing
+      ? financeState.financialMemory.map((item) => item.id === existing.id ? entity : item)
+      : [...financeState.financialMemory, entity];
+    setState(reprocessFinancialState({ ...financeState, financialMemory }));
+  }
+
+  function removeRelationshipNote(memoryEntityId: string) {
+    createCheckpoint(userId, financeState, 'Antes de remover anotação de relacionamento');
+    const now = new Date().toISOString();
+    setState(reprocessFinancialState({
+      ...financeState,
+      financialMemory: financeState.financialMemory.map((item) => item.id === memoryEntityId
+        ? { ...item, contextLabel: undefined, notes: undefined, updatedAt: now }
+        : item),
+    }));
+  }
+
+  function openRelationshipTransactions(summary: FinancialRelationshipSummary) {
+    setQuery('');
+    setRelationshipFilter({ name: summary.displayName, transactionIds: summary.transactionIds });
+    setTechnicalTypeFilter('all');
+    setDirectionFilter('all');
+    setCategoryFilter('all');
+    setDateStart('');
+    setDateEnd('');
+    setMonth('all');
+    setActiveTab('transactions');
   }
 
   function saveTransferDetail(result: TransferDetailResult) {
@@ -1138,9 +1180,9 @@ function FinanceApp({ session }: { session: Session }) {
       ...transaction,
       categoryId: undefined,
       categorySource: 'none' as const,
-      categoryReviewStatus: 'resolved' as const,
-      reviewReasons: transaction.reviewReasons.filter((reason) => reason !== 'uncategorized'),
-      needsReview: transaction.reviewReasons.some((reason) => reason !== 'uncategorized'),
+      categoryReviewStatus: 'not_applicable' as const,
+      reviewReasons: transaction.reviewReasons.filter((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer'),
+      needsReview: transaction.reviewReasons.some((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer'),
       manualEditLog: [...transaction.manualEditLog, {
         field: 'transactionAllocations',
         oldValue: financeState.transactionAllocations.filter((allocation) => allocation.transactionId === transactionId).map((allocation) => allocation.id),
@@ -1239,6 +1281,7 @@ function FinanceApp({ session }: { session: Session }) {
 
   function clearTransactionFilters() {
     setQuery('');
+    setRelationshipFilter(null);
     setAccountFilter('all');
     setInstitutionFilter('all');
     setCategoryFilter('all');
@@ -1305,20 +1348,6 @@ function FinanceApp({ session }: { session: Session }) {
 
   const syncLabel = syncState === 'saved' ? 'Salvo na nuvem' : syncState === 'saving' ? 'Salvando...' : syncState === 'offline' ? 'Modo local' : syncState === 'error' ? 'Falha de sincronização' : syncState === 'conflict' ? 'Conflito protegido' : 'Carregando';
 
-  function askAssistant(question = assistantQuestion) {
-    const clean = question.trim();
-    if (!clean) return;
-    setAssistantAnswer(financialDecisionFacade.answerQuestion({
-      appState: financeState,
-      currency,
-      question: clean,
-      targetAccountId: assistantTargetAccountId || undefined,
-      range: range ?? {},
-    }));
-    setAssistantQuestion(clean);
-  }
-
-
   function recordBalanceSnapshot() {
     const candidates = activeAccounts.filter((account) => account.currency === currency);
     if (!candidates.length) {
@@ -1383,7 +1412,7 @@ function FinanceApp({ session }: { session: Session }) {
   const invalidMaximumAmount = Boolean(maxAmount.trim() && maximumFilterCents === undefined);
   const invalidAmountRange = minimumFilterCents !== undefined && maximumFilterCents !== undefined && minimumFilterCents > maximumFilterCents;
   const invalidFilters = invalidDateRange || invalidMinimumAmount || invalidMaximumAmount || invalidAmountRange;
-  const filtersActive = Boolean(query || accountFilter !== 'all' || institutionFilter !== 'all' || categoryFilter !== 'all' || month !== 'all'
+  const filtersActive = Boolean(query || relationshipFilter || accountFilter !== 'all' || institutionFilter !== 'all' || categoryFilter !== 'all' || month !== 'all'
     || dateStart || dateEnd || minAmount || maxAmount || directionFilter !== 'all'
     || technicalTypeFilter !== 'all' || sourceFilter !== 'all' || reviewOnly);
   const latestActiveDecision = financeState.reviewDecisions.find((item) => !item.undoneAt);
@@ -1410,7 +1439,7 @@ function FinanceApp({ session }: { session: Session }) {
     <div className="panel-title"><div><h2>{reviewMode ? 'Movimentações para revisar' : 'Movimentações'}</h2><small>{reviewMode ? 'Corrija somente o que ficou ambíguo.' : 'Do mais recente para o mais antigo.'}</small></div><span>{items.length}</span></div>
     {!reviewMode && <section className="transaction-tools">
       <section className="toolbar compact-toolbar">
-        <label><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar descrição, comerciante, nota ou ID" /></label>
+        <label><Search size={17} /><input value={query} onChange={(event) => { setQuery(event.target.value); setRelationshipFilter(null); }} placeholder="Buscar descrição, comerciante, nota ou ID" /></label>
         <select value={accountFilter} onChange={(event) => setAccountFilter(event.target.value)}><option value="all">Todas as contas</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select><select value={institutionFilter} onChange={(event) => { setInstitutionFilter(event.target.value as 'all' | Institution); setAccountFilter('all'); }}><option value="all">Todas as instituições</option>{currencyInstitutions.map((institution) => <option key={institution} value={institution}>{institution === 'revolut' ? 'Revolut' : institution === 'wise' ? 'Wise' : institution}</option>)}</select>
         <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Todas as categorias</option><option value="uncategorized">Sem categoria</option>{financeState.categories.filter((category) => category.active).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
         <select value={month} onChange={(event) => { setMonth(event.target.value); setDateStart(''); setDateEnd(''); }}><option value="all">Todo o histórico</option>{months.map((item) => <option key={item} value={item}>{item}</option>)}</select>
@@ -1431,6 +1460,7 @@ function FinanceApp({ session }: { session: Session }) {
         {(invalidMinimumAmount || invalidMaximumAmount) && <p className="filter-warning">Use um valor numérico válido nos limites do filtro.</p>}
         {invalidAmountRange && <p className="filter-warning">O valor mínimo precisa ser menor ou igual ao valor máximo.</p>}
       </details>
+      {relationshipFilter && <div className="relationship-filter-chip"><span>Relacionamento: <b>{relationshipFilter.name}</b> · {filtered.length} movimentos</span><button type="button" className="icon-button tiny" aria-label="Remover filtro de relacionamento" onClick={() => setRelationshipFilter(null)}><X size={14} /></button></div>}
       <div className="transaction-actions">
         <button type="button" className="secondary" onClick={() => setBulkRuleOpen(true)} disabled={filtered.length === 0 || invalidFilters}><WandSparkles size={16} /> Criar regra com prévia</button>
         <button type="button" className="secondary" onClick={exportFilteredCsv} disabled={filtered.length === 0 || invalidFilters}><FileDown size={16} /> Exportar estes {filtered.length}</button>
@@ -1448,8 +1478,8 @@ function FinanceApp({ session }: { session: Session }) {
         ? (transaction.reportedAmountCents ?? (transaction.direction === 'inflow' ? transaction.amountCents : -transaction.amountCents))
         : signedNetMovement(transaction);
       return <article className={`tx ${transaction.needsReview ? 'needs-review' : ''} ${reverted ? 'reverted' : ''}`} key={transaction.id}>
-        <button type="button" className="tx-main" onClick={() => setTransactionSheet(transaction)}><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : allocations.length ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small>{allocationSummary && <span className="allocation-summary">{allocationSummary}</span>}{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</button>
-        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select><select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || allocations.length > 0 || !isCategoryReviewApplicable(transaction.technicalType)}><option value="">{allocations.length ? 'Usa o detalhamento' : 'Sem categoria'}</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>{transaction.kind === 'transfer' && !transaction.analysisExcluded && !reverted && <button type="button" className="secondary tx-detail-button" onClick={() => setTransferDetailTransaction(transaction)}><ReceiptText size={14} /> {allocations.length ? 'Editar detalhes' : 'Detalhar transferência'}</button>}</div>
+        <button type="button" className="tx-main" onClick={() => setTransactionSheet(transaction)}><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {accountName(transaction.accountId)} · {technicalTypeLabel(transaction.technicalType)} · {reverted ? 'Revertida, sem efeito financeiro' : allocations.length ? 'Contexto adicionado' : transaction.kind === 'transfer' && !transaction.analysisExcluded ? 'Transferência · contexto opcional' : categoryName(transaction.categoryId)}</small>{allocationSummary && <span className="allocation-summary">{allocationSummary}</span>}{transaction.reviewReasons.length > 0 && <span className="review-label">{transaction.reviewReasons.map(reviewReasonLabel).join(' · ')}</span>}</button>
+        <div className="tx-controls"><select aria-label={`Tipo técnico de ${transaction.descriptionOriginal}`} value={transaction.technicalType} onChange={(event) => updateTechnicalType(transaction, event.target.value as TechnicalMovementType)} disabled={reverted}>{technicalOptions.map((type) => <option key={type} value={type}>{technicalTypeLabel(type)}</option>)}</select>{isCategoryReviewApplicable(transaction.technicalType) ? <select aria-label={`Categoria de ${transaction.descriptionOriginal}`} value={transaction.categoryId ?? ''} onChange={(event) => updateCategory(transaction, event.target.value)} disabled={reverted || allocations.length > 0}><option value="">{allocations.length ? 'Usa o contexto' : 'Sem categoria'}</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select> : transaction.kind === 'transfer' && !transaction.analysisExcluded ? <span className="transfer-context-state">Transferência compreendida · contexto opcional</span> : null}{transaction.kind === 'transfer' && !transaction.analysisExcluded && !reverted && <button type="button" className="secondary tx-detail-button" onClick={() => setTransferDetailTransaction(transaction)}><ReceiptText size={14} /> {allocations.length ? 'Editar contexto' : 'Adicionar contexto'}</button>}</div>
         <strong className={`${displayedMovement > 0 ? 'positive' : ''} ${reverted ? 'reverted-amount' : ''}`}>{displayedMovement < 0 ? '-' : '+'}{formatMoney(Math.abs(displayedMovement), transaction.currency)}{reverted && <small>revertida</small>}</strong>
       </article>;
     })}</div>}
@@ -1480,7 +1510,14 @@ function FinanceApp({ session }: { session: Session }) {
     .slice(0, 5);
   const todayActivity = buildTodayActivity(financeState, currency, today);
   const healthReport = buildDataHealthReport(financeState);
-  const memorySuggestions = buildMemorySuggestions(financeState, currency);
+  const financialRelationships = buildFinancialRelationships(financeState, currency);
+  const relationshipTimeline = buildRelationshipTimeline(financeState, currency);
+  const relationshipIntelligence = Object.fromEntries(financialRelationships.map((item) => [item.key, buildRelationshipIntelligence(financeState, item, financialRelationships)]));
+  const relationshipOverviewInsights = buildRelationshipOverviewInsights(financeState, financialRelationships);
+  const financialHistory = buildFinancialHistory(financeState, currency);
+  const monthlyFinancialStories = buildMonthlyFinancialStories(financeState, currency);
+  const topSentRelationships = topRelationshipSenders(financialRelationships, 3);
+  const topReceivedRelationships = topRelationshipReceivers(financialRelationships, 3);
   const balanceConfidenceLabel = currencyPosition.confidence === 'confirmed' ? 'Confirmado'
     : currencyPosition.confidence === 'estimated' ? 'Estimado após a última confirmação'
       : currencyPosition.confidence === 'stale' ? 'Possivelmente desatualizado' : 'Precisa confirmar';
@@ -1493,7 +1530,7 @@ function FinanceApp({ session }: { session: Session }) {
     ? formatMoney(currencyPosition.availableBalanceCents, currency)
     : undefined;
   const topCategoryAmount = categoryRows.reduce((sum, item) => sum + item.amountCents, 0);
-  const otherCategoryAmount = Math.max(0, analytics.current.summary.expenseCents - topCategoryAmount);
+  const otherCategoryAmount = Math.max(0, analytics.current.categorizedExpenseCents - topCategoryAmount);
   const primaryImpactInsight = nowImpactInsights[0] ?? opportunityImpactInsights[0];
 
   return (
@@ -1537,14 +1574,16 @@ function FinanceApp({ session }: { session: Session }) {
         <section className="panel flow-panel">
           <div className="panel-title"><div><small>FLUXO DO PERÍODO · {analysisPeriodLabel}</small><h2>Resultado do fluxo{periodCriticalPendingCount > 0 ? ' provisório' : ''}</h2></div><ChartNoAxesCombined size={22} /></div>
           <div className="flow-breakdown"><article><small>Entradas externas</small><b className="positive">{formatMoney(analytics.current.summary.incomeCents, currency)}</b></article><article><small>Saídas externas líquidas</small><b>{formatMoney(analytics.current.summary.netExpenseCents, currency)}</b></article><article><small>Resultado do fluxo</small><b className={analytics.current.summary.netCashflowCents >= 0 ? 'positive' : 'negative'}>{formatMoney(analytics.current.summary.netCashflowCents, currency)}</b></article></div>
-          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Despesas brutas</small><b>{formatMoney(analytics.current.summary.expenseCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Transferências internas e conversões ficam fora do fluxo. Taxas bancárias entram como despesas separadas. Saldo é posição; fluxo é movimento.</p></details>
+          <details className="calculation-details"><summary>Como chegamos neste número</summary><div className="calculation-grid"><span><small>Compras e despesas</small><b>{formatMoney(analytics.current.categorizedExpenseCents, currency)}</b></span><span><small>Transferências enviadas</small><b>{formatMoney(analytics.current.transferOutflowCents, currency)}</b></span><span><small>Transferências recebidas</small><b>{formatMoney(analytics.current.transferInflowCents, currency)}</b></span><span><small>Reembolsos</small><b>{formatMoney(analytics.current.summary.refundCents, currency)}</b></span><span><small>Internas/conversões</small><b>{analytics.current.excludedTransferTransactionCount}</b></span><span><small>Despesas sem categoria</small><b>{analytics.current.uncategorizedTransactionCount}</b></span></div><p>Transferências para pessoas participam do fluxo externo, mas ficam separadas de compras e despesas. Internas e conversões não alteram o fluxo. Saldo é posição; fluxo é movimento.</p></details>
         </section>
 
-        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <button type="button" className="recent-row" key={transaction.id} onClick={() => transaction.kind === 'transfer' && !transaction.analysisExcluded ? setTransferDetailTransaction(transaction) : setActiveTab('transactions')}><div><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {financeState.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id) ? 'Detalhada por finalidade' : categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : 'negative'}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></button>)}</div></section>
+        <section className="panel home-section"><div className="panel-title"><div><small>ÚLTIMAS ATIVIDADES</small><h2>Movimentações recentes</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Ver todas</button></div><div className="recent-list">{recentTransactions.map((transaction) => <button type="button" className="recent-row" key={transaction.id} onClick={() => transaction.kind === 'transfer' && !transaction.analysisExcluded ? setTransferDetailTransaction(transaction) : setActiveTab('transactions')}><div><b>{transaction.friendlyDescription ?? transaction.descriptionOriginal}</b><small>{formatReportingDate(transaction.reportingDate)} · {financeState.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id) ? 'Contexto adicionado' : transaction.kind === 'transfer' && !transaction.analysisExcluded ? 'Transferência' : categoryName(transaction.categoryId)}</small></div><strong className={signedNetMovement(transaction) > 0 ? 'positive' : 'negative'}>{signedNetMovement(transaction) < 0 ? '-' : '+'}{formatMoney(Math.abs(signedNetMovement(transaction)), transaction.currency)}</strong></button>)}</div></section>
 
         {primaryImpactInsight && <section className="home-insights"><div className="section-heading"><div><span className="eyebrow">PRIORIDADE</span><h2>O que pode mudar uma decisão</h2></div><button type="button" className="link-button" onClick={() => { setDiscoveriesView(primaryImpactInsight.group); setActiveTab('discoveries'); }}>Ver todas</button></div><ImpactInsightCard insight={primaryImpactInsight} compact onAction={openImpactAction} /></section>}
 
-        <section className="panel home-section"><div className="panel-title"><div><small>GASTOS POR FINALIDADE</small><h2>Para onde foi seu dinheiro?</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Explorar</button></div>{categoryRows.length ? <>{categoryRows.map((item) => { const max = categoryRows[0]?.amountCents ?? 1; return <button type="button" className="cat cat-button" key={item.key} onClick={() => { setCategoryFilter(item.key); setActiveTab('transactions'); }}><div><span>{categoryName(item.key)}</span><b>{formatMoney(item.amountCents, currency)}</b></div><i><em style={{ width: `${Math.max(3, item.amountCents / max * 100)}%` }} /></i><small>{Math.round(item.share * 100)}% · {item.transactionCount} movimentos/itens</small></button>; })}{otherCategoryAmount > 0 && <div className="other-categories"><span>Outras categorias</span><b>{formatMoney(otherCategoryAmount, currency)} · {Math.round(otherCategoryAmount / Math.max(1, analytics.current.summary.expenseCents) * 100)}%</b></div>}</> : <p className="muted">Ainda não há despesas classificadas neste período.</p>}</section>
+        <section className="panel home-section"><div className="panel-title"><div><small>COMPRAS E DESPESAS</small><h2>Para onde foi seu dinheiro?</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('transactions')}>Explorar</button></div>{categoryRows.length ? <>{categoryRows.map((item) => { const max = categoryRows[0]?.amountCents ?? 1; return <button type="button" className="cat cat-button" key={item.key} onClick={() => { setCategoryFilter(item.key); setActiveTab('transactions'); }}><div><span>{categoryName(item.key)}</span><b>{formatMoney(item.amountCents, currency)}</b></div><i><em style={{ width: `${Math.max(3, item.amountCents / max * 100)}%` }} /></i><small>{Math.round(item.share * 100)}% · {item.transactionCount} movimentos/itens</small></button>; })}{otherCategoryAmount > 0 && <div className="other-categories"><span>Outras categorias</span><b>{formatMoney(otherCategoryAmount, currency)} · {Math.round(otherCategoryAmount / Math.max(1, analytics.current.categorizedExpenseCents) * 100)}%</b></div>}</> : <p className="muted">Ainda não há despesas classificadas neste período.</p>}</section>
+
+        {(topSentRelationships.length > 0 || topReceivedRelationships.length > 0) && <section className="panel home-section home-relationships"><div className="panel-title"><div><small>TRANSFERÊNCIAS ENTRE PESSOAS</small><h2>Seus principais relacionamentos</h2></div><button type="button" className="link-button" onClick={() => setActiveTab('relationships')}>Ver mapa</button></div><div className="home-relationship-columns"><div><small>MAIS ENVIADO</small>{topSentRelationships.map((item) => <button type="button" key={`sent-${item.key}`} onClick={() => openRelationshipTransactions(item)}><span><b>{item.displayName}</b><em>{item.sentCount} transferências</em></span><strong>{formatMoney(item.sentCents, currency)}</strong></button>)}</div><div><small>MAIS RECEBIDO</small>{topReceivedRelationships.map((item) => <button type="button" key={`received-${item.key}`} onClick={() => openRelationshipTransactions(item)}><span><b>{item.displayName}</b><em>{item.receivedCount} transferências</em></span><strong>{formatMoney(item.receivedCents, currency)}</strong></button>)}</div></div><p>Esses valores vêm diretamente das transferências reconhecidas. Nenhuma finalidade manual é necessária.</p></section>}
       </section>}
 
       {activeTab === 'transactions' && renderTransactions()}
@@ -1575,6 +1614,7 @@ function FinanceApp({ session }: { session: Session }) {
         <span className="eyebrow">INSIGHTS</span>
         <h1>Contexto que<br />leva a uma ação.</h1>
         <p>Um insight só aparece quando muda uma decisão ou aumenta de verdade a compreensão. O óbvio não ganha cartão só porque veio acompanhado de porcentagem.</p>
+        <div className="insights-hub-actions"><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={17}/> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={17}/> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={17}/> Auditoria</button></div>
         <nav className="discoveries-tabs" aria-label="Tipos de insights"><button type="button" className={discoveriesView === 'now' ? 'active' : ''} onClick={() => setDiscoveriesView('now')}>Agora <span>{nowImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'opportunity' ? 'active' : ''} onClick={() => setDiscoveriesView('opportunity')}>Oportunidades <span>{opportunityImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'patterns' ? 'active' : ''} onClick={() => setDiscoveriesView('patterns')}>Padrões <span>{insightResult.insights.length}</span></button></nav>
 
         {discoveriesView === 'now' && <div className="impact-stack">{nowImpactInsights.length ? nowImpactInsights.map((insight) => <ImpactInsightCard key={insight.id} insight={insight} onAction={openImpactAction} />) : <section className="panel empty compact-empty"><BadgeCheck size={30} /><p>Nenhuma ação urgente identificada com os dados atuais.</p></section>}</div>}
@@ -1599,7 +1639,14 @@ function FinanceApp({ session }: { session: Session }) {
         </>}
       </section>}
 
-      {activeTab === 'assistant' && <section className="assistant-page"><span className="eyebrow">ASSISTENTE DETERMINÍSTICO</span><h1>Converse com<br />seus números.</h1><p>Ele não inventa saldo nem usa IA para decidir. O motor responde a partir da reconciliação, do forecast e dos compromissos cadastrados.</p><label className="assistant-account-selector">Conta-alvo<select aria-label="Conta-alvo do assistente" value={assistantTargetAccountId} onChange={(event) => setAssistantTargetAccountId(event.target.value)}><option value="">Selecione uma conta</option>{activeAccounts.filter((account) => account.currency === currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><div className="prompt-grid">{['Onde foi meu dinheiro este mês?','Posso comprar uma TV de €600?','Quanto posso gastar até o pagamento?','Há cobranças duplicadas?'].map((prompt) => <button type="button" className="prompt-card" key={prompt} onClick={() => { setAssistantQuestion(prompt); askAssistant(prompt); }}>{prompt}</button>)}</div>{assistantAnswer && <div className={`assistant-answer ${assistantAnswer.status ?? ''}`}><b>JF</b><p>{assistantAnswer.answer}</p>{assistantAnswer.evidence.length > 0 && <ul>{assistantAnswer.evidence.map((item) => <li key={item}>{item}</li>)}</ul>}<small>Confiança {assistantAnswer.confidence === 'high' ? 'alta' : assistantAnswer.confidence === 'medium' ? 'média' : 'baixa'} · escopo: {assistantAnswer.dataScope ?? 'estado financeiro'} · {currency}</small></div>}<div className="assistant-input"><input value={assistantQuestion} onChange={(event) => setAssistantQuestion(event.target.value)} placeholder="Pergunte sobre seu dinheiro" onKeyDown={(event) => event.key === 'Enter' && askAssistant()} /><button type="button" onClick={() => askAssistant()}><Send size={18} /></button></div></section>}
+      {activeTab === 'assistant' && <FinancialAnalystPanel currency={currency} accounts={activeAccounts} targetAccountId={assistantTargetAccountId} setTargetAccountId={setAssistantTargetAccountId} askDeterministic={(question) => financialDecisionFacade.answerQuestion({ appState: financeState, currency, question, targetAccountId: assistantTargetAccountId || undefined, range: range ?? {} })} askAi={(question, mode) => requestFinancialAnalyst(financeState, { currency, question, mode })} />}
+
+      {activeTab === 'history' && <FinancialHistoryPanel currency={currency} events={financialHistory} stories={monthlyFinancialStories} openEvent={(event) => {
+        if (event.transactionIds.length) {
+          setRelationshipFilter({ name: event.title, transactionIds: event.transactionIds });
+          setActiveTab('transactions');
+        }
+      }} />}
 
       {activeTab === 'accounts' && <section className="settings-page">
         <span className="eyebrow">MAIS</span><h1>Contas, dados<br />e controle.</h1>
@@ -1613,7 +1660,7 @@ function FinanceApp({ session }: { session: Session }) {
         <section className="panel integrity-panel"><div className="panel-title"><div><small>INTEGRIDADE VISÍVEL</small><h2>Quanto o aplicativo realmente sabe</h2></div><ShieldCheck size={20} /></div><div className="integrity-grid"><span><small>Saldo</small><b>{balanceConfidenceLabel}</b></span><span><small>Histórico disponível</small><b>{currencyHistoryStart && currencyHistoryEnd ? `${formatReportingDate(currencyHistoryStart)} a ${formatReportingDate(currencyHistoryEnd)}` : 'sem dados'}</b></span><span><small>Pendências críticas</small><b>{criticalPendingCount}</b></span><span><small>Pares internos sugeridos</small><b>{internalTransferSuggestions.length}</b></span><span><small>Conversões sem par</small><b>{unpairedConversionCount}</b></span><span><small>Detalhamentos</small><b>{financeState.transactionAllocations.filter((allocation) => financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)).length}</b></span></div></section>
 
         <div className="import-card"><label className="import-fallback-label"><span>Destino de apoio para arquivos genéricos</span><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>{account.name} · {institutionName(account.institution)}</option>)}</select></label><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato bancário</button><small>Wise e Revolut são detectados e separados automaticamente por instituição, moeda e produto. O destino acima só é usado quando o arquivo realmente não traz essa informação.</small></div>
-        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length + transferRecurrenceSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => setActiveTab('health')}><ShieldCheck size={18} /> Saúde da base ({healthReport.score})</button><button type="button" className="secondary" onClick={() => setActiveTab('memory')}><Layers3 size={18} /> Memória financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={18} /> Auditoria inteligente</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => setActiveTab('health')}><ShieldCheck size={18} /> Saúde da base ({healthReport.score})</button><button type="button" className="secondary" onClick={() => setActiveTab('relationships')}><Layers3 size={18} /> Relacionamentos financeiros</button><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={18} /> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={18} /> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={18} /> Auditoria inteligente</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
         <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{(batch.accountIds?.length ?? 1) > 1 ? `${batch.accountIds!.length} contas` : accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
         <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
       </section>}
@@ -1624,11 +1671,7 @@ function FinanceApp({ session }: { session: Session }) {
         setPendingAuditProposal(proposal);
       }} />}
 
-      {activeTab === 'memory' && <FinancialMemoryPanel state={financeState} suggestions={memorySuggestions} create={(input) => {
-        createCheckpoint(userId, financeState, `Antes de ensinar ${input.displayName}`);
-        const entity = createMemoryEntity({ displayName: input.displayName, aliases: [input.alias], type: input.type as FinancialEntityType, relationship: input.relationship as FinancialEntityRelationship, contextLabel: input.contextLabel, categoryId: input.categoryId, direction: input.direction, validFrom: input.validFrom, validUntil: input.validUntil, source: 'confirmed_suggestion' });
-        setState(reprocessFinancialState({ ...financeState, financialMemory: [...financeState.financialMemory, entity] }));
-      }} remove={(id) => { createCheckpoint(userId, financeState, 'Antes de remover memória financeira'); setState(reprocessFinancialState({ ...financeState, financialMemory: financeState.financialMemory.filter((item) => item.id !== id), transactions: financeState.transactions.map((item) => item.counterpartyEntityId === id ? { ...item, counterpartyEntityId: undefined } : item) })); }} />}
+      {activeTab === 'relationships' && <FinancialRelationshipsPanel relationships={financialRelationships} currency={currency} saveNote={saveRelationshipNote} removeNote={removeRelationshipNote} openTransactions={openRelationshipTransactions} timeline={relationshipTimeline} intelligence={relationshipIntelligence} overviewInsights={relationshipOverviewInsights} />}
 
       {activeTab === 'ai' && <AiAuditPanel proposals={financeState.auditProposals} runs={financeState.aiAuditRuns} busy={aiAuditBusy} runLocal={() => {
         const proposals = buildDeterministicAuditProposals(financeState);
@@ -1643,8 +1686,7 @@ function FinanceApp({ session }: { session: Session }) {
         finally { setAiAuditBusy(false); }
       }} apply={(proposal: AuditProposal) => setPendingAuditProposal(proposal)} dismiss={(proposal) => setState({ ...financeState, auditProposals: financeState.auditProposals.map((item) => item.id === proposal.id ? { ...item, status: 'dismissed', resolvedAt: new Date().toISOString() } : item) })} />}
 
-      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Resolva em grupos.<br />Controle as exceções.</h1><div className="review-summary-grid"><article className={criticalPendingCount ? 'attention' : ''}><small>Corrigir dados</small><b>{criticalPendingCount}</b><span>Afeta cálculo ou integridade</span></article><article><small>Confirmar vínculos</small><b>{internalTransferSuggestions.length}</b><span>Contas próprias e conversões</span></article><article><small>Ensinar contexto</small><b>{memorySuggestions.length}</b><span>Pessoas e padrões recorrentes</span></article><article><small>Organizar categorias</small><b>{pendingReviewGroupCount}</b><span>Opcional, não trava o fluxo</span></article></div><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 && transferRecurrenceSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
-        <TransferRecurrencePanel suggestions={transferRecurrenceSuggestions} categories={financeState.categories} apply={applyRecurrencePurpose} />
+      {activeTab === 'review' && <section className="review-page"><span className="eyebrow">REVISAR</span><h1>Só o que afeta<br />os números.</h1><div className="review-summary-grid"><article className={criticalPendingCount ? 'attention' : ''}><small>Corrigir dados</small><b>{criticalPendingCount}</b><span>Afeta cálculo ou integridade</span></article><article><small>Confirmar vínculos</small><b>{internalTransferSuggestions.length}</b><span>Contas próprias e conversões</span></article><article><small>Relacionamentos</small><b>{financialRelationships.length}</b><span>Reconhecidos sem criar pendência</span></article><article><small>Organizar despesas</small><b>{pendingReviewGroupCount}</b><span>Somente compras e despesas</span></article></div><div className="review-history-bar"><span>{financeState.reviewDecisions.filter((item) => !item.undoneAt).length} decisões ativas</span><button type="button" className="secondary" disabled={!financeState.reviewDecisions.some((item) => !item.undoneAt)} onClick={undoReviewDecision}><RotateCcw size={16} /> Desfazer última decisão</button></div>{recentReviewDecisions.length > 0 && <details className="review-decision-history"><summary>Histórico recente</summary><div>{recentReviewDecisions.map((decision) => <article className={decision.undoneAt ? 'undone' : ''} key={decision.id}><div><b>{decision.label}</b><small>{new Date(decision.createdAt).toLocaleString('pt-BR')} · {decision.transactionIds.length} movimentações</small></div><span>{decision.undoneAt ? 'desfeita' : 'ativa'}</span></article>)}</div></details>}{internalTransferSuggestions.length > 0 && <section className="panel internal-match-list"><div className="panel-title"><div><small>ENTRE SUAS CONTAS</small><h2>Possíveis transferências internas</h2></div><ArrowLeftRight size={20} /></div><p>Os dois lançamentos continuam no livro. Confirmar apenas os vincula e os retira de receita e despesa.</p><div>{internalTransferSuggestions.map((suggestion) => <article className="internal-match-card" key={suggestion.key}><header><span className={`match-confidence ${suggestion.confidence}`}>{suggestion.confidence === 'high' ? 'Confiança alta' : 'Revisar'}</span><strong>{formatMoney(suggestion.amountCents, suggestion.outflow.currency)}</strong></header><div className="match-sides"><span><small>SAIU</small><b>{accountName(suggestion.outflow.accountId)}</b><em>{formatReportingDate(suggestion.outflow.reportingDate)} · {suggestion.outflow.descriptionOriginal}</em></span><ArrowLeftRight size={18} /><span><small>ENTROU</small><b>{accountName(suggestion.inflow.accountId)}</b><em>{formatReportingDate(suggestion.inflow.reportingDate)} · {suggestion.inflow.descriptionOriginal}</em></span></div><ul>{suggestion.evidence.map((item) => <li key={item}>{item}</li>)}</ul><footer><button type="button" className="secondary" onClick={() => rejectInternalSuggestion(suggestion)}>Não são minhas contas</button><button type="button" onClick={() => confirmInternalSuggestion(suggestion)}>Confirmar vínculo</button></footer></article>)}</div></section>}{unresolvedIssues.length === 0 && reviewTransactions.length === 0 && eventsNeedingAccountReview.length === 0 && currencyReviewGroups.length === 0 && internalTransferSuggestions.length === 0 ? <section className="panel empty"><CircleAlert size={32} /><p>Nenhuma pendência aberta.</p></section> : <>
         <ReviewGroupsPanel groups={currencyReviewGroups} transactions={visibleTransactions} categories={financeState.categories} apply={applyReviewGroup} resolveWithoutCategory={resolveReviewGroupWithoutCategory} defer={postponeReviewGroup} reopen={reactivateReviewGroup} applyOne={applyReviewException} />
         {eventsNeedingAccountReview.length > 0 && <section className="panel issues"><h3>Eventos sem conta</h3><p>Escolha a conta para reativá-los no forecast ou exclua o evento.</p>{eventsNeedingAccountReview.map((item) => <article key={item.id}><div className="issue-heading"><b>{item.title}</b><button type="button" className="icon-button tiny" title={`Excluir ${item.title}`} aria-label={`Excluir compromisso ${item.title}`} onClick={() => deletePlannedEvent(item.id)}><Trash2 size={15} /></button></div><p>{item.dueDate} · {formatMoney(item.amountCents, item.currency)}</p><label>Conta<select aria-label={`Conta para ${item.title}`} defaultValue="" onChange={(event) => event.target.value && resolvePlannedEventAccount(item.id, event.target.value)}><option value="">Selecionar conta</option>{activeAccounts.filter((account) => account.currency === item.currency).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label></article>)}</section>}
         {unresolvedIssues.length > 0 && <section className="panel issues"><h3>Pendências de importação</h3>{unresolvedIssues.map((item) => <article key={item.id}><b>{item.kind.replaceAll('_', ' ')}</b><p>{item.message}</p><small>{accountName(item.accountId)}{item.rowNumber ? ` · linha ${item.rowNumber}` : ''}</small><button type="button" onClick={() => dismissIssue(item)}>Marcar como revisada</button></article>)}</section>}
@@ -1653,7 +1695,7 @@ function FinanceApp({ session }: { session: Session }) {
 
       <input ref={input} hidden type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && onFile(event.target.files[0])} />
       <input ref={backupInput} hidden type="file" accept=".json,application/json" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && restoreBackup(event.target.files[0])} />
-      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={['discoveries','assistant','ai'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Insights</span></button><button type="button" className={['accounts','review','health','memory'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
+      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={['discoveries','assistant','history','ai'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Insights</span></button><button type="button" className={['accounts','review','health','relationships'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
 
       {syncConflict && <SyncConflictModal conflict={syncConflict} busy={conflictBusy} message={error} exportLocal={() => exportState(syncConflict.localState)} keepLocal={keepLocalConflictVersion} useRemote={useRemoteConflictVersion} />}
       {preview && <ImportPreview preview={preview} includePossibleDuplicates={includePossibleDuplicates} setIncludePossibleDuplicates={setIncludePossibleDuplicates} allowPartial={allowPartial} setAllowPartial={setAllowPartial} close={() => setPreview(null)} confirm={confirmImport} />}

@@ -1,8 +1,65 @@
-# Japa Finance v0.9 Alpha 6 — Fidelidade bancária, contexto e auditoria
+# Japa Finance v0.9 Alpha 8 — Compreensão Financeira
+
+A Alpha 8 acrescenta a camada que faltava depois do Relationship Engine: o aplicativo passa a responder perguntas objetivas, reconstruir mudanças observáveis da vida financeira e oferecer interpretação por IA sem entregar à IA o controle do livro. Transferências continuam completas sem categoria ou finalidade. O núcleo financeiro segue determinístico e funciona integralmente sem chave da OpenAI.
+
+## O que entra na Alpha 8
+
+- **Perguntar aos números:** respostas locais e auditáveis para saldos, limites, transferências por pessoa, rankings de remetentes e destinatários, primeiro uso de Wise/Revolut, custos explícitos de câmbio e gasto líquido por comerciante;
+- **História Financeira:** linha do tempo derivada do extrato com início de uso de instituições, mudança da instituição dominante, troca da principal origem de transferências recebidas, despesas muito acima do padrão, primeira conversão e primeira posição de saldo confirmada;
+- **Panorama mensal:** entradas e saídas externas, compras, transferências entre pessoas, taxas e volume de movimentos por mês, sem misturar consumo com dinheiro apenas movimentado;
+- **Inteligência por relacionamento:** participação nos envios e recebimentos, médias, cadência, meses de maior movimento e insights automáticos sem exigir preenchimento;
+- **Anotações realmente opcionais:** uma nota pode enriquecer o relacionamento, mas não cria pendência, não classifica todas as transferências e não altera saldo;
+- **Analista por IA opcional:** panorama, explicações e hipóteses em linguagem natural usando um contexto estruturado, sem CSV bruto, sem ferramenta web e sem permissão para calcular ou alterar fatos;
+- **Auditoria inteligente separada:** a pesquisa externa continua restrita a comerciantes e instituições públicas; pessoas particulares não são pesquisadas;
+- **Privacidade por arquitetura:** a chave da OpenAI permanece exclusivamente no servidor Vercel e as chamadas usam `store: false`;
+- **Sem nova migration:** o estado permanece em `schemaVersion: 13`, porque história, inteligência e contexto da IA são derivados do livro já existente.
+
+## Regra permanente
+
+```text
+Extrato bancário → fatos imutáveis → cálculos determinísticos → relacionamentos e eventos → interpretação opcional da IA
+```
+
+A IA pode explicar, resumir e levantar hipóteses. Ela nunca é a fonte oficial de saldo, data, valor, moeda, reconciliação ou classificação técnica. A ausência de chave da OpenAI desativa apenas as funções de interpretação; todo o restante continua funcionando.
+
+---
+
+## Base herdada da Alpha 7 — Relationship Engine
+
+A Alpha 7 remove o principal trabalho manual que ainda restava: transferências entre pessoas não precisam mais de categoria nem finalidade para serem consideradas corretas. O aplicativo reconhece a contraparte, soma quanto foi enviado e recebido e constrói um mapa de relacionamentos financeiros. Contexto pessoal continua disponível, mas é um enriquecimento opcional, nunca uma pendência.
+
+## Fundamentos da Alpha 7
+
+- transferências recebidas e enviadas ficam tecnicamente completas assim que a contraparte é reconhecida;
+- ausência de categoria, finalidade ou contexto em transferência não cria revisão, alerta nem período provisório;
+- compras, taxas e outras despesas continuam usando categorias; transferências para pessoas ficam fora dos gráficos de despesas e dos padrões de consumo;
+- novo painel **Relacionamentos Financeiros**, com maiores destinatários, maiores remetentes, total enviado, recebido, saldo da relação, histórico e busca;
+- nomes abreviados e completos podem ser consolidados de forma conservadora, preservando todos os aliases bancários;
+- contexto opcional é salvo no relacionamento e pode valer para todas as aparições da pessoa, sem editar linha por linha;
+- a Home mostra os principais relacionamentos diretamente do extrato;
+- a revisão mostra somente problemas que afetam números, vínculos internos ou despesas categorizáveis;
+- o diagnóstico e a auditoria inteligente deixam de tratar pessoa sem contexto como falha;
+- insights de compras, comerciantes, dias e horários excluem transferências entre pessoas;
+- séries recorrentes detalhadas são deduplicadas antes de anualizar, evitando multiplicar o mesmo compromisso pelo histórico inteiro;
+- clicar num relacionamento abre exatamente as movimentações que o compõem, inclusive quando o banco usou variações do nome.
+
+O estado passa para `schemaVersion: 13`. Backups schema 12 são migrados automaticamente. A migração remove apenas razões antigas de revisão de transferências e preserva valores, fatos bancários, contexto já salvo e decisões manuais. Não há migration SQL nova do Supabase.
+
+## Princípio do produto
+
+```text
+Fato bancário → tipo técnico → contraparte → relacionamento → contexto opcional → insight
+```
+
+O aplicativo não exige uma explicação que não seja necessária para saldo, fluxo ou análise. Uma transferência para Hannah já é uma transferência para Hannah. “Empréstimo”, “assinaturas compartilhadas” ou outro contexto podem ser acrescentados depois, quando realmente forem úteis.
+
+---
+
+## Base herdada da Alpha 6 — Fidelidade bancária, contexto e auditoria
 
 A Alpha 6 reorganiza o aplicativo para que o extrato seja a fonte dos fatos e toda interpretação fique numa camada auditável. O objetivo não é apenas classificar lançamentos, mas responder de onde cada número veio, o que ainda é incerto e quais correções podem ser aplicadas sem alterar decisões manuais.
 
-## Fundamentos da Alpha 6
+### Fundamentos da Alpha 6
 
 - livros bancários separados por instituição, moeda e produto, incluindo Revolut Atual, Revolut Poupanças, Wise Conta principal e movimentos de Rende+;
 - ciclo de vida completo das movimentações: pendente, concluída, revertida e enriquecida por reimportação;

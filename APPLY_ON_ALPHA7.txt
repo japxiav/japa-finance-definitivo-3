@@ -1,0 +1,3 @@
+Aplique estes arquivos sobre a Alpha 7 exata, preservando os caminhos.
+Para substituir o repositório inteiro, prefira o ZIP completo Alpha 8.
+Não há migration SQL nova; schemaVersion permanece 13.

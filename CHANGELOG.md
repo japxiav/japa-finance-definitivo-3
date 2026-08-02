@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.0-alpha.8 - 2026-08-02
+
+- Adicionada a área **Perguntar aos números**, com respostas determinísticas para transferências por contraparte, maiores remetentes e destinatários, uso de instituições, taxas explícitas de câmbio e gasto líquido por comerciante.
+- Nomes completos e abreviados de relacionamentos podem ser encontrados por um token distintivo, permitindo perguntas naturais como “quanto mandei para Hannah?”.
+- Criada a **História Financeira**, derivada dos fatos bancários, com mudanças de instituição dominante, origem principal de transferências recebidas, despesas fora do padrão, conversões e posições confirmadas.
+- Adicionado panorama mensal separando entradas e saídas externas, compras, transferências entre pessoas, taxas e conversões.
+- Relacionamentos recebem métricas de participação, média, cadência, meses de maior movimento e insights automáticos sem gerar novas pendências.
+- O painel de relacionamentos usa anotação livre e opcional; limpar a anotação preserva aliases, períodos e outros conhecimentos existentes da entidade.
+- Criada rota protegida `/api/financial-assistant` para interpretações, panoramas e hipóteses por IA, usando contexto financeiro estruturado e saída JSON validada.
+- A nova rota não recebe ferramenta web, usa `store: false`, não recebe CSV bruto e não pode devolver ações executáveis.
+- A Auditoria Inteligente e sua pesquisa pública permanecem separadas do analista privado.
+- O app continua funcional sem `OPENAI_API_KEY`; apenas panorama e hipóteses por IA ficam indisponíveis.
+- Mantido `schemaVersion: 13`; não há migration SQL nova.
+- Cache do service worker atualizado para Alpha 8.
+- Validado com compilação estrita do núcleo, typecheck estrutural da interface com stubs, transpilação sintática, smoke test sobre 994 fatos dos extratos reais e simulação integral da rota de IA. npm, Vitest, Vite, navegador, Supabase remoto, Vercel e OpenAI real não foram executados.
+
+
+
+## 0.9.0-alpha.7 - 2026-08-02
+
+- Estado migrado para `schemaVersion: 13`; transferências recebidas, enviadas, internas e conversões deixam de exigir categoria ou finalidade.
+- Razões antigas `uncategorized` e `ambiguous_transfer` são removidas das transferências durante a migração, sem sobrescrever decisões manuais.
+- Criado o Relationship Engine, que deriva pessoas e contrapartes diretamente dos extratos e consolida valores enviados, recebidos, frequência e intervalo.
+- Adicionado painel Relacionamentos Financeiros com rankings, mapa completo, pesquisa, filtros, saldo da relação e linha do tempo de mudanças observáveis.
+- Contexto pessoal passa a ser opcional e salvo por relacionamento, com todos os aliases bancários conhecidos.
+- A Home mostra maiores destinatários e remetentes sem pedir classificação manual.
+- Clicar num relacionamento filtra exatamente seus IDs de movimentação, evitando perder aliases abreviados na busca textual.
+- Compras e despesas foram separadas de transferências entre pessoas nas categorias, comerciantes, ticket médio, maior despesa, dias sem gasto e padrões por horário/dia.
+- O fluxo externo continua incluindo transferências, mas sua composição passa a mostrar compras/despesas, transferências enviadas e transferências recebidas separadamente.
+- A revisão deixa de criar grupos de categoria para transferências e mostra contexto apenas como enriquecimento opcional.
+- Diagnóstico, auditoria determinística e prompt da IA deixam de tratar transferências sem contexto como falha ou pendência.
+- O insight de recorrências deduplica séries equivalentes antes de calcular impacto mensal e anual.
+- Cache do service worker atualizado para Alpha 7.
+- Validado com transpilação sintática de 101 arquivos TypeScript, typecheck estrutural com stubs, compilação estrita do núcleo e smoke test sobre 994 fatos dos extratos reais. npm, Vitest, Vite, navegador, Supabase remoto, Vercel e OpenAI real não foram executados.
+
 
 ## 0.9.0-alpha.6 - 2026-08-02
 
