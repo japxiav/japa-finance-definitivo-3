@@ -124,6 +124,8 @@ Regras invioláveis:
 - proponha correções, nunca afirme que as aplicou;
 - não use pesquisa externa nesta etapa;
 - não produza observações óbvias. Uma conclusão deve revelar inconsistência, consequência, mudança relevante ou decisão útil;
+- transferências entre pessoas já estão completas sem categoria ou finalidade; falta de contexto pessoal não é erro nem pendência;
+- não proponha create_memory_entity apenas porque uma pessoa apareceu sem contexto. Só faça isso quando a pergunta do usuário pedir enriquecimento contextual;
 - evidências devem apontar para IDs e contagens presentes no contexto;
 - use somente IDs de categoria existentes em categorySummary.
 
