@@ -3,7 +3,6 @@ import type { AnalyticsBundle } from '../analytics/metrics';
 import type { CurrencyAnalytics } from '../analytics/currencyAnalytics';
 import type { CurrencyPosition, FreeMoneyPosition } from '../analytics/accountPositions';
 import type { InternalTransferSuggestion } from '../application/internalTransfers';
-import { signedNetMovement } from '../core/finance';
 import { addCents } from '../domain/arithmetic';
 
 export type ImpactInsightGroup = 'now' | 'opportunity';
@@ -104,36 +103,26 @@ export function buildImpactInsights(input: {
     });
   }
 
-  const allocatedTransactionIds = new Set(state.transactionAllocations.map((allocation) => allocation.transactionId));
-  const undetailedTransfers = analytics.current.transactions.filter((transaction) =>
-    transaction.kind === 'transfer'
-    && transaction.direction === 'outflow'
-    && !transaction.analysisExcluded
-    && !allocatedTransactionIds.has(transaction.id)
-    && !transaction.counterpartyEntityId);
-  const counterparties = new Set(undetailedTransfers
-    .map((transaction) => transaction.merchantNormalized)
-    .filter(Boolean));
-  if (counterparties.size > 0 && undetailedTransfers.length >= 3) {
-    const total = undetailedTransfers.reduce((sum, transaction) => addCents(sum, Math.abs(signedNetMovement(transaction))), 0);
-    items.push({
-      id: 'unknown-transfer-contexts', group: 'opportunity', tone: 'neutral', title: 'Algumas pessoas recorrentes ainda não têm contexto',
-      message: `Há ${counterparties.size} ${counterparties.size === 1 ? 'contraparte recorrente' : 'contrapartes recorrentes'} sem vínculo na Memória Financeira. Identificar cada grupo uma vez evita revisar transferência por transferência.`,
-      impactLabel: 'Movimento sem contexto', impactValue: formatMoney(total),
-      evidence: [{ label: 'Transferências', value: String(undetailedTransfers.length) }, { label: 'Grupos de contraparte', value: String(counterparties.size) }],
-      action: 'transfer-details', actionLabel: 'Ensinar contexto por grupo',
-    });
-  }
+  // Contexto de pessoas é enriquecimento opcional na Alpha 7.
+  // A ausência dele nunca vira alerta, pendência ou oportunidade artificial.
 
-  const recurring = state.transactionAllocations.filter((allocation) => allocation.recurring
-    && state.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency));
+  const recurringSeries = new Map<string, AppState['transactionAllocations'][number]>();
+  for (const allocation of state.transactionAllocations) {
+    if (!allocation.recurring
+      || !state.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)) continue;
+    const key = [allocation.relatedPerson ?? '', allocation.label, allocation.recurrenceFrequency ?? 'monthly']
+      .join('|').toLocaleLowerCase('pt-BR').replace(/\s+/g, ' ').trim();
+    const current = recurringSeries.get(key);
+    if (!current || allocation.updatedAt > current.updatedAt) recurringSeries.set(key, allocation);
+  }
+  const recurring = [...recurringSeries.values()];
   if (recurring.length > 0) {
     const monthly = recurring.reduce((sum, allocation) => addCents(sum, monthlyEquivalent(allocation.amountCents, allocation.recurrenceFrequency)), 0);
     items.push({
       id: 'shared-recurring', group: 'opportunity', tone: 'neutral', title: 'Pagamentos recorrentes escondidos em transferências',
       message: `Os itens detalhados equivalem a aproximadamente ${formatMoney(monthly)} por mês e ${formatMoney(monthly * 12)} por ano.`,
       impactLabel: 'Impacto anual', impactValue: formatMoney(monthly * 12),
-      evidence: [{ label: 'Itens recorrentes', value: String(recurring.length) }, { label: 'Média mensal', value: formatMoney(monthly) }],
+      evidence: [{ label: 'Séries recorrentes', value: String(recurring.length) }, { label: 'Média mensal', value: formatMoney(monthly) }],
       action: 'plan', actionLabel: 'Planejar recorrências',
     });
   }

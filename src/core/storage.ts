@@ -617,7 +617,7 @@ function migrateV11(candidate: Record<string, unknown>, fallback: AppState): Rec
     };
     return withFriendlyDescription(next);
   });
-  transactions = linkCompoundEvents({ ...(candidate as object), schemaVersion: 12, accounts, transactions } as AppState).transactions;
+  transactions = linkCompoundEvents({ ...(candidate as object), schemaVersion: 13, accounts, transactions } as AppState).transactions;
 
   const previousOwnerIdentity = (candidate.ownerIdentity ?? fallback.ownerIdentity) as OwnerIdentityProfile;
   const ownerIdentity: OwnerIdentityProfile = {
@@ -649,6 +649,29 @@ function migrateV11(candidate: Record<string, unknown>, fallback: AppState): Rec
     knowledgeBase: [],
     auditProposals: [],
     aiAuditRuns: [],
+    reviewGroups: [],
+  } as unknown as AppState;
+  state.reviewGroups = buildReviewGroups(state);
+  return state as unknown as Record<string, unknown>;
+}
+
+function migrateV12(candidate: Record<string, unknown>): Record<string, unknown> {
+  const transactions = (Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : []).map((transaction) => {
+    if (!['incoming_transfer', 'outgoing_transfer', 'internal_transfer', 'currency_conversion'].includes(transaction.technicalType)) return transaction;
+    const reviewReasons = [...new Set(transaction.reviewReasons ?? [])]
+      .filter((reason) => reason !== 'uncategorized' && reason !== 'ambiguous_transfer');
+    return withFriendlyDescription({
+      ...transaction,
+      // Transferência é um fato completo. Categoria e finalidade permanecem opcionais.
+      categoryReviewStatus: 'not_applicable',
+      reviewReasons,
+      needsReview: reviewReasons.length > 0,
+    });
+  });
+  const state = {
+    ...(candidate as object),
+    schemaVersion: 13,
+    transactions,
     reviewGroups: [],
   } as unknown as AppState;
   state.reviewGroups = buildReviewGroups(state);
@@ -696,7 +719,10 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 11) {
     return normalizeState(migrateV11(candidate, fallback), fallback);
   }
-  if (candidate.schemaVersion !== 12) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 12) {
+    return normalizeState(migrateV12(candidate), fallback);
+  }
+  if (candidate.schemaVersion !== 13) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];

@@ -34,6 +34,11 @@ export interface MetricsSnapshot {
   isComplete: boolean;
   summary: CashflowSummary;
   expenseTransactionCount: number;
+  /** Compras e despesas categorizáveis, sem transferências para pessoas. */
+  categorizedExpenseCents: number;
+  transferOutflowCents: number;
+  transferInflowCents: number;
+  transferTransactionCount: number;
   incomeTransactionCount: number;
   refundTransactionCount: number;
   excludedTransferTransactionCount: number;
@@ -174,17 +179,23 @@ function snapshot(
   const expenses = analytical.filter((transaction) => isAnalyticalExpense(transaction) && signedNetMovement(transaction) < 0);
   const incomes = analytical.filter((transaction) => isAnalyticalIncome(transaction) && signedNetMovement(transaction) > 0);
   const refunds = analytical.filter((transaction) => transaction.kind === 'refund' && signedNetMovement(transaction) > 0);
+  const outgoingTransfers = expenses.filter((transaction) => transaction.technicalType === 'outgoing_transfer');
+  const incomingTransfers = incomes.filter((transaction) => transaction.technicalType === 'incoming_transfer');
+  const categorizedExpenses = expenses.filter((transaction) => transaction.technicalType !== 'outgoing_transfer');
+  const categorizedExpenseCents = categorizedExpenses.reduce((sum, transaction) => addCents(sum, Math.abs(signedNetMovement(transaction))), 0);
+  const transferOutflowCents = outgoingTransfers.reduce((sum, transaction) => addCents(sum, Math.abs(signedNetMovement(transaction))), 0);
+  const transferInflowCents = incomingTransfers.reduce((sum, transaction) => addCents(sum, Math.abs(signedNetMovement(transaction))), 0);
   const excludedTransfers = transactions.filter((transaction) =>
     transaction.kind === 'transfer' && transaction.analysisExcluded);
   const unknown = analytical.filter((transaction) => transaction.kind === 'unknown');
   const allocationsByTransaction = new Map(state.transactionAllocations.map((allocation) => [allocation.transactionId, true]));
-  const uncategorized = analytical.filter((transaction) => !transaction.categoryId && !allocationsByTransaction.has(transaction.id));
+  const uncategorized = categorizedExpenses.filter((transaction) => !transaction.categoryId && !allocationsByTransaction.has(transaction.id));
   const summary = cashflowSummary(allTransactions, currency, range);
   const effectiveEnd = clampEffectiveEnd(range, latestReportingDate);
-  const expenseDates = new Set(expenses.map((transaction) => transaction.reportingDate));
+  const expenseDates = new Set(categorizedExpenses.map((transaction) => transaction.reportingDate));
   const periodDays = civilDaysBetween(range.start, range.end) + 1;
   const observedDays = Math.max(1, civilDaysBetween(range.start, effectiveEnd) + 1);
-  const largest = [...expenses].sort((a, b) => Math.abs(signedNetMovement(b)) - Math.abs(signedNetMovement(a)))[0];
+  const largest = [...categorizedExpenses].sort((a, b) => Math.abs(signedNetMovement(b)) - Math.abs(signedNetMovement(a)))[0];
 
   return {
     range,
@@ -193,7 +204,11 @@ function snapshot(
     observedDays,
     isComplete: Boolean(latestReportingDate && latestReportingDate >= range.end),
     summary,
-    expenseTransactionCount: expenses.length,
+    expenseTransactionCount: categorizedExpenses.length,
+    categorizedExpenseCents,
+    transferOutflowCents,
+    transferInflowCents,
+    transferTransactionCount: outgoingTransfers.length + incomingTransfers.length,
     incomeTransactionCount: incomes.length,
     refundTransactionCount: refunds.length,
     excludedTransferTransactionCount: excludedTransfers.length,
@@ -202,11 +217,11 @@ function snapshot(
     activeExpenseDays: expenseDates.size,
     daysWithoutExpense: Math.max(0, observedDays - expenseDates.size),
     longestNoSpendStreak: longestNoSpend(range, expenseDates, effectiveEnd),
-    averageExpenseCents: expenses.length ? Math.round(summary.expenseCents / expenses.length) : 0,
-    byCategory: rankedCategories(expenses, summary.expenseCents, state),
-    byMerchant: ranked(expenses, summary.expenseCents, (transaction) => transaction.merchantNormalized || transaction.descriptionOriginal),
-    byWeekday: ranked(expenses, summary.expenseCents, (transaction) => dateToWeekday(transaction.reportingDate)),
-    byDaypart: ranked(expenses, summary.expenseCents, daypart),
+    averageExpenseCents: categorizedExpenses.length ? Math.round(categorizedExpenseCents / categorizedExpenses.length) : 0,
+    byCategory: rankedCategories(categorizedExpenses, categorizedExpenseCents, state),
+    byMerchant: ranked(categorizedExpenses, categorizedExpenseCents, (transaction) => transaction.merchantNormalized || transaction.descriptionOriginal),
+    byWeekday: ranked(categorizedExpenses, categorizedExpenseCents, (transaction) => dateToWeekday(transaction.reportingDate)),
+    byDaypart: ranked(categorizedExpenses, categorizedExpenseCents, daypart),
     largestExpense: largest ? {
       transactionId: largest.id,
       description: largest.descriptionOriginal,

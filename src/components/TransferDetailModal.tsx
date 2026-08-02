@@ -1,9 +1,8 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
 import type { Category, PlannedEvent, Transaction, TransactionAllocation, TransferPurpose } from '../core/types';
 import { formatMoney, parseSignedMoneyToCents } from '../core/money';
 import { signedNetMovement } from '../core/finance';
-import { isCategoryCompatible } from '../classification/categoryCompatibility';
 
 interface EditableAllocation {
   id?: string;
@@ -89,9 +88,6 @@ export function TransferDetailModal({
     ? allocations.map(toEditable)
     : [blank(totalCents)]);
   const [message, setMessage] = useState('');
-  const categoryOptions = useMemo(() => categories.filter((category) =>
-    isCategoryCompatible(category, transaction)), [categories, transaction]);
-
   const parsed = rows.map((row) => {
     try { return Math.abs(parseSignedMoneyToCents(row.amount)); } catch { return undefined; }
   });
@@ -137,7 +133,7 @@ export function TransferDetailModal({
         transactionId: transaction.id,
         label: row.label.trim(),
         amountCents: parsed[index]!,
-        categoryId: row.categoryId || undefined,
+        categoryId: undefined,
         purpose: row.purpose,
         relatedPerson: row.relatedPerson.trim() || undefined,
         recurring: row.recurring,
@@ -154,12 +150,12 @@ export function TransferDetailModal({
 
   return <div className="modal-bg"><form className="modal wide-modal transfer-detail-modal" onSubmit={submit}>
     <button type="button" className="close" onClick={close}><X size={18} /></button>
-    <span className="eyebrow">DETALHAR TRANSFERÊNCIA</span>
+    <span className="eyebrow">CONTEXTO OPCIONAL</span>
     <h2>{transaction.descriptionOriginal}</h2>
-    <p>O banco mostra como o dinheiro saiu. Aqui você informa por quê, sem alterar o lançamento original.</p>
+    <p>A transferência já está correta sem nenhuma explicação. Use esta tela somente quando quiser registrar um motivo, dividir o valor ou criar um compromisso futuro.</p>
     <div className={`allocation-total ${remainingCents === 0 ? 'closed' : ''}`}>
       <span>Total {formatMoney(totalCents, transaction.currency)}</span>
-      <b>{remainingCents === 0 ? 'Detalhamento fechado' : `Faltam ${formatMoney(Math.abs(remainingCents), transaction.currency)}${remainingCents < 0 ? ' em excesso' : ''}`}</b>
+      <b>{remainingCents === 0 ? 'Contexto fechado' : `Faltam ${formatMoney(Math.abs(remainingCents), transaction.currency)}${remainingCents < 0 ? ' em excesso' : ''}`}</b>
     </div>
     <div className="allocation-list">{rows.map((row, index) => <article className="allocation-row" key={row.id ?? index}>
       <header><b>Item {index + 1}</b><button type="button" className="icon-button tiny" disabled={rows.length === 1} onClick={() => setRows((current) => current.filter((_, rowIndex) => rowIndex !== index))}><Trash2 size={15} /></button></header>
@@ -167,7 +163,6 @@ export function TransferDetailModal({
         <label>Descrição<input value={row.label} onChange={(event) => update(index, { label: event.target.value })} placeholder="Netflix, pensão, mercado..." /></label>
         <label>Valor<input inputMode="decimal" value={row.amount} onChange={(event) => update(index, { amount: event.target.value })} placeholder="0,00" /></label>
         <label>Finalidade<select value={row.purpose} onChange={(event) => update(index, { purpose: event.target.value as TransferPurpose })}>{PURPOSES.map((purpose) => <option key={purpose.value} value={purpose.value}>{purpose.label}</option>)}</select></label>
-        <label>Categoria<select value={row.categoryId} onChange={(event) => update(index, { categoryId: event.target.value })}><option value="">Sem categoria</option>{categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
         <label>Pessoa relacionada<input value={row.relatedPerson} onChange={(event) => update(index, { relatedPerson: event.target.value })} placeholder="Opcional" /></label>
         <label>Observação<input value={row.note} onChange={(event) => update(index, { note: event.target.value })} placeholder="Opcional" /></label>
       </div>
@@ -181,6 +176,6 @@ export function TransferDetailModal({
     </article>)}</div>
     <button type="button" className="secondary add-allocation" onClick={() => setRows((current) => [...current, blank(Math.max(0, remainingCents))])}><Plus size={16} /> Adicionar item</button>
     {message && <div className="form-message error">{message}</div>}
-    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="submit">Salvar detalhamento</button></footer>
+    <footer><button type="button" className="secondary" onClick={close}>Cancelar</button><button type="submit">Salvar contexto</button></footer>
   </form></div>;
 }

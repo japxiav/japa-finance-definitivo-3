@@ -516,7 +516,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 12;
+  schemaVersion: 13;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];

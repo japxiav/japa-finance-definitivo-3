@@ -7,7 +7,7 @@ import type {
   TechnicalMovementType,
 } from '../core/types';
 import { buildDataHealthReport, severityForHealthCheck } from './dataHealth';
-import { buildMemorySuggestions } from './financialMemory';
+import { buildFinancialRelationships } from './financialRelationships';
 import { findInternalTransferSuggestions } from './internalTransfers';
 import { previewReprocess } from './reprocess';
 import { stableHash } from '../core/hash';
@@ -39,15 +39,15 @@ export interface FinancialAuditContext {
     validFrom?: string;
     validUntil?: string;
   }>;
-  recurringCounterparties: Array<{
+  relationshipSummary: Array<{
     displayName: string;
-    direction: string;
+    currency: string;
+    sentCents: number;
+    receivedCents: number;
     count: number;
     firstDate: string;
     lastDate: string;
-    currency: string;
-    totalCents: number;
-    sampleDescriptions: string[];
+    contextLabel?: string;
   }>;
   unknownPatterns: Array<{
     normalized: string;
@@ -89,20 +89,19 @@ export function buildFinancialAuditContext(state: AppState): FinancialAuditConte
       lastMovementDate: rows.map((item) => item.reportingDate).sort().at(-1),
     };
   });
-  const memorySuggestions = buildMemorySuggestions(state);
-  const recurringCounterparties = memorySuggestions.slice(0, 30).map((suggestion) => {
-    const rows = suggestion.transactionIds.map((id) => state.transactions.find((item) => item.id === id)).filter(Boolean) as AppState['transactions'];
-    return {
-      displayName: suggestion.displayName,
-      direction: suggestion.direction,
-      count: suggestion.count,
-      firstDate: suggestion.firstDate,
-      lastDate: suggestion.lastDate,
-      currency: rows[0]?.currency ?? '',
-      totalCents: rows.reduce((sum, item) => sum + Math.abs(signedNetMovement(item)), 0),
-      sampleDescriptions: [...new Set(rows.slice(0, 4).map((item) => item.descriptionOriginal))],
-    };
-  });
+  const relationshipSummary = currencies.flatMap((currency) => buildFinancialRelationships(state, currency))
+    .sort((a, b) => (b.sentCents + b.receivedCents) - (a.sentCents + a.receivedCents))
+    .slice(0, 30)
+    .map((item) => ({
+      displayName: item.displayName,
+      currency: item.currency,
+      sentCents: item.sentCents,
+      receivedCents: item.receivedCents,
+      count: item.totalCount,
+      firstDate: item.firstDate,
+      lastDate: item.lastDate,
+      contextLabel: item.contextLabel,
+    }));
   const unknownBuckets = new Map<string, AppState['transactions']>();
   for (const transaction of state.transactions) {
     if (transaction.status !== 'completed' || transaction.technicalType !== 'unknown') continue;
@@ -171,7 +170,7 @@ export function buildFinancialAuditContext(state: AppState): FinancialAuditConte
       validFrom: item.validFrom,
       validUntil: item.validUntil,
     })),
-    recurringCounterparties,
+    relationshipSummary,
     unknownPatterns,
     recentChanges,
     publicLookupCandidates,
@@ -222,25 +221,7 @@ export function buildDeterministicAuditProposals(state: AppState): AuditProposal
     }));
   }
 
-  for (const memory of buildMemorySuggestions(state).slice(0, 20)) {
-    proposals.push(proposal({
-      type: 'create_memory_entity',
-      severity: 'info',
-      title: `Ensinar quem é ${memory.displayName}`,
-      explanation: `${memory.count} transferências recorrentes foram agrupadas. Uma resposta sobre o contexto vale para o grupo inteiro e para próximos extratos.`,
-      evidence: memory.evidence,
-      transactionIds: memory.transactionIds,
-      accountIds: [],
-      confidence: memory.count >= 5 ? 'high' : 'medium',
-      payload: {
-        displayName: memory.displayName,
-        alias: memory.normalizedAlias,
-        direction: memory.direction,
-        validFrom: memory.firstDate,
-        validUntil: memory.lastDate,
-      },
-    }));
-  }
+  // Relações sem contexto não são falhas. A auditoria não cria uma fila paralela de formulários.
 
   const health = buildDataHealthReport(state);
   for (const check of health.checks.filter((item) => item.status === 'error' || item.status === 'warning')) {

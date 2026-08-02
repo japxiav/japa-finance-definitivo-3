@@ -48,7 +48,9 @@ export function isTechnicalTypeDirectionCompatible(type: TechnicalMovementType, 
 }
 
 export function isCategoryReviewApplicable(type: TechnicalMovementType): boolean {
-  return type !== 'internal_transfer' && type !== 'currency_conversion' && type !== 'unknown';
+  // Alpha 7: transferências já estão tecnicamente compreendidas sem categoria.
+  // Contexto e finalidade podem ser adicionados depois, mas nunca viram pendência.
+  return !['incoming_transfer', 'outgoing_transfer', 'internal_transfer', 'currency_conversion', 'unknown'].includes(type);
 }
 
 export function technicalTypeLabel(type: TechnicalMovementType): string {

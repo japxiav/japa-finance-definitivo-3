@@ -89,7 +89,7 @@ function postIncomePattern(state: AppState, currency: string): {
   const incomeDates = transactions
     .filter((item) => isAnalyticalIncome(item) && signedNetMovement(item) > 0)
     .map((item) => item.reportingDate);
-  const expenses = transactions.filter((item) => isAnalyticalExpense(item) && signedNetMovement(item) < 0);
+  const expenses = transactions.filter((item) => isAnalyticalExpense(item) && item.technicalType !== 'outgoing_transfer' && signedNetMovement(item) < 0);
   let postIncomeCount = 0;
   let postIncomeAmountCents = 0;
   let totalAmountCents = 0;
@@ -254,8 +254,8 @@ function addDataQualityInsights(state: AppState, bundle: AnalyticsBundle, items:
 
 function addCashflowInsights(bundle: AnalyticsBundle, items: FinancialInsight[]) {
   const { current, previous, currency } = bundle;
-  const currentSpend = current.summary.netExpenseCents;
-  const previousSpend = previous.summary.netExpenseCents;
+  const currentSpend = current.categorizedExpenseCents;
+  const previousSpend = previous.categorizedExpenseCents;
   const change = percentChange(currentSpend, previousSpend);
   const minimum = 1_500;
   if (change !== undefined && Math.abs(currentSpend - previousSpend) >= minimum && Math.abs(change) >= 0.15 && previous.expenseTransactionCount >= 3) {
@@ -263,10 +263,10 @@ function addCashflowInsights(bundle: AnalyticsBundle, items: FinancialInsight[])
     items.push(candidate({
       id: `total-spend-change:${current.range.start}`,
       family: 'total-spend-change',
-      title: increased ? 'Seu ritmo de gastos aumentou' : 'Você reduziu seus gastos',
+      title: increased ? 'Compras e despesas aumentaram' : 'Compras e despesas diminuíram',
       message: increased
-        ? `As saídas líquidas cresceram ${pct(Math.abs(change))} em comparação com o período anterior.`
-        : `As saídas líquidas caíram ${pct(Math.abs(change))} em comparação com o período anterior.`,
+        ? `Compras, taxas e outras despesas cresceram ${pct(Math.abs(change))} em comparação com o período anterior. Transferências para pessoas ficam fora desta análise.`
+        : `Compras, taxas e outras despesas caíram ${pct(Math.abs(change))} em comparação com o período anterior. Transferências para pessoas ficam fora desta análise.`,
       tone: increased ? 'warning' : 'positive',
       confidence: confidenceFor(current.expenseTransactionCount + previous.expenseTransactionCount),
       priority: increased ? 91 : 84,

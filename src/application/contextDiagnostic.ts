@@ -122,7 +122,6 @@ export function buildContextDiagnostic(state: AppState): ContextDiagnostic {
     unknowns: state.transactions.filter((transaction) => transaction.status === 'completed' && (
       transaction.technicalType === 'unknown'
       || transaction.categoryReviewStatus === 'pending'
-      || (transaction.kind === 'transfer' && !transaction.analysisExcluded && !state.transactionAllocations.some((allocation) => allocation.transactionId === transaction.id))
     )).map((transaction) => ({
       transactionId: transaction.id,
       description: transaction.descriptionOriginal,

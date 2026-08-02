@@ -172,7 +172,7 @@ export function expenseByCategory(
       || transaction.currency !== currency
       || !inDateRange(transaction, range)) continue;
 
-    if (isAnalyticalExpense(transaction)) {
+    if (isAnalyticalExpense(transaction) && transaction.technicalType !== 'outgoing_transfer') {
       const movement = signedNetMovement(transaction);
       if (movement < 0) {
         // Taxas adicionais permanecem na categoria da transação de origem:
