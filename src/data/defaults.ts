@@ -1,7 +1,7 @@
 import type { AppState } from '../core/types';
 
 export const initialState: AppState = {
-  schemaVersion: 13,
+  schemaVersion: 15,
   accounts: [
     { id: 'revolut-eur', name: 'Revolut Atual EUR', currency: 'EUR', institution: 'revolut', product: 'Atual', source: 'default', active: true },
     { id: 'revolut-brl', name: 'Revolut Atual BRL', currency: 'BRL', institution: 'revolut', product: 'Atual', source: 'default', active: false },
@@ -42,6 +42,9 @@ export const initialState: AppState = {
   knowledgeBase: [],
   auditProposals: [],
   aiAuditRuns: [],
+  financialObjects: [],
+  behaviorMemory: [],
+  onboarding: { completed: false, lastStep: 'welcome' },
   ownerIdentity: {
     displayName: 'Diogo',
     aliases: ['Diogo'],

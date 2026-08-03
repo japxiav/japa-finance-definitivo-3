@@ -509,6 +509,74 @@ export interface AiAuditRun {
   inputFingerprint: string;
 }
 
+
+export type FinancialObjectType =
+  | 'subscription'
+  | 'loan'
+  | 'family_support'
+  | 'trip'
+  | 'large_purchase'
+  | 'goal'
+  | 'reserve'
+  | 'commitment'
+  | 'project';
+
+export type FinancialObjectStatus = 'active' | 'completed' | 'archived';
+
+/** Um contexto da vida real que reúne fatos bancários sem reescrevê-los. */
+export interface FinancialObject {
+  id: string;
+  type: FinancialObjectType;
+  title: string;
+  currency: CurrencyCode;
+  status: FinancialObjectStatus;
+  relationshipEntityId?: string;
+  merchantNormalized?: string;
+  transactionIds: string[];
+  plannedEventIds: string[];
+  targetCents?: number;
+  expectedCents?: number;
+  startDate?: string;
+  endDate?: string;
+  notes?: string;
+  source: 'manual' | 'confirmed_suggestion' | 'system';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BehaviorMemoryKind =
+  | 'income_cadence'
+  | 'spending_baseline'
+  | 'relationship_pattern'
+  | 'merchant_pattern'
+  | 'account_usage'
+  | 'commitment_pattern';
+
+/** Memória confirmada ou observada; nunca altera a matemática do livro. */
+export interface BehaviorMemoryEntry {
+  id: string;
+  currency: CurrencyCode;
+  kind: BehaviorMemoryKind;
+  subjectKey: string;
+  title: string;
+  summary: string;
+  evidence: string[];
+  confidence: SuggestionConfidence;
+  observedFrom: string;
+  observedUntil: string;
+  confirmed: boolean;
+  dismissedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OnboardingState {
+  completed: boolean;
+  completedAt?: string;
+  dismissedAt?: string;
+  lastStep?: 'welcome' | 'privacy' | 'accounts' | 'import' | 'done';
+}
+
 export interface SyncMetadata {
   remoteRevision: number;
   remoteUpdatedAt: string;
@@ -516,7 +584,7 @@ export interface SyncMetadata {
 }
 
 export interface AppState {
-  schemaVersion: 13;
+  schemaVersion: 15;
   accounts: Account[];
   transactions: Transaction[];
   imports: ImportBatch[];
@@ -538,5 +606,8 @@ export interface AppState {
   knowledgeBase: KnowledgeEntry[];
   auditProposals: AuditProposal[];
   aiAuditRuns: AiAuditRun[];
+  financialObjects: FinancialObject[];
+  behaviorMemory: BehaviorMemoryEntry[];
+  onboarding: OnboardingState;
 }
 

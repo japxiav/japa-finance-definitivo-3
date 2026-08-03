@@ -1,7 +1,7 @@
 {
   "name": "japa-finance",
   "private": true,
-  "version": "0.9.0-alpha.8",
+  "version": "0.9.0-alpha.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,7 +22,8 @@
     "verify:auth": "rm -rf auth_audit_build && tsc --outDir auth_audit_build --strict --target ES2022 --module CommonJS --moduleResolution Node src/auth/accessControl.ts && printf '{\"type\":\"commonjs\"}' > auth_audit_build/package.json && node scripts/verify-auth-isolation.mjs",
     "verify:code": "npm run verify:insights && npm run verify:consolidation && npm run verify:operational && npm run verify:professional && npm run verify:auth && npm run verify:architecture && npm run verify:sync && npm run verify:security && npm run verify:pwa && npm run verify:supabase",
     "verify:local": "npm test && npm run verify:code && npm run build",
-    "verify:insights": "rm -rf insights_build && tsc --outDir insights_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-insights.ts src/analytics/metrics.ts src/insights/types.ts src/insights/engine.ts src/data/defaults.ts src/core/csv.ts src/core/date.ts src/core/hash.ts src/core/merchant.ts src/core/money.ts src/core/finance.ts src/core/storage.ts src/core/types.ts src/domain/arithmetic.ts src/domain/dates.ts && printf '{\"type\":\"commonjs\"}' > insights_build/package.json && node insights_build/scripts/verify-insights.js"
+    "verify:insights": "rm -rf insights_build && tsc --outDir insights_build --strict --target ES2022 --module CommonJS --moduleResolution Node --lib ES2023,DOM scripts/verify-insights.ts src/analytics/metrics.ts src/insights/types.ts src/insights/engine.ts src/data/defaults.ts src/core/csv.ts src/core/date.ts src/core/hash.ts src/core/merchant.ts src/core/money.ts src/core/finance.ts src/core/storage.ts src/core/types.ts src/domain/arithmetic.ts src/domain/dates.ts && printf '{\"type\":\"commonjs\"}' > insights_build/package.json && node insights_build/scripts/verify-insights.js",
+    "verify:alpha9": "node scripts/verify-alpha9-structure.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.55.0",

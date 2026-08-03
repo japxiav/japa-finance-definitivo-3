@@ -617,7 +617,7 @@ function migrateV11(candidate: Record<string, unknown>, fallback: AppState): Rec
     };
     return withFriendlyDescription(next);
   });
-  transactions = linkCompoundEvents({ ...(candidate as object), schemaVersion: 13, accounts, transactions } as AppState).transactions;
+  transactions = linkCompoundEvents({ ...(candidate as object), schemaVersion: 15, accounts, transactions } as AppState).transactions;
 
   const previousOwnerIdentity = (candidate.ownerIdentity ?? fallback.ownerIdentity) as OwnerIdentityProfile;
   const ownerIdentity: OwnerIdentityProfile = {
@@ -678,6 +678,53 @@ function migrateV12(candidate: Record<string, unknown>): Record<string, unknown>
   return state as unknown as Record<string, unknown>;
 }
 
+
+function migrateV13(candidate: Record<string, unknown>): Record<string, unknown> {
+  const oldTransactions = Array.isArray(candidate.transactions) ? candidate.transactions as Transaction[] : [];
+  const transactionById = new Map(oldTransactions.map((transaction) => [transaction.id, transaction]));
+  const transactions = oldTransactions.map((transaction) => {
+    if (transaction.sourceComponent !== 'fee') return transaction;
+    const parent = transaction.feeOfTransactionId ? transactionById.get(transaction.feeOfTransactionId) : undefined;
+    const reviewReasons = [...new Set(transaction.reviewReasons ?? [])]
+      .filter((reason) => reason !== 'unknown_kind' && reason !== 'ambiguous_transfer' && reason !== 'uncategorized');
+    return withFriendlyDescription({
+      ...transaction,
+      // Alpha 6 podia reclassificar a linha sintética da comissão como conversão.
+      // O componente continua sendo uma saída real, mas sua natureza é sempre taxa.
+      technicalType: 'bank_fee',
+      kind: 'expense',
+      direction: 'outflow',
+      kindSource: 'bank',
+      analysisExcluded: false,
+      transferGroupId: undefined,
+      categoryId: undefined,
+      categorySource: 'none',
+      categoryReviewStatus: 'resolved',
+      reviewReasons,
+      needsReview: reviewReasons.length > 0,
+      compoundEventId: transaction.compoundEventId ?? parent?.compoundEventId,
+      friendlyDescription: 'Taxa de conversão',
+    });
+  });
+  return {
+    ...(candidate as object),
+    schemaVersion: 14,
+    transactions,
+  } as Record<string, unknown>;
+}
+
+function migrateV14(candidate: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(candidate as object),
+    schemaVersion: 15,
+    financialObjects: Array.isArray(candidate.financialObjects) ? candidate.financialObjects : [],
+    behaviorMemory: Array.isArray(candidate.behaviorMemory) ? candidate.behaviorMemory : [],
+    onboarding: candidate.onboarding && typeof candidate.onboarding === 'object' && !Array.isArray(candidate.onboarding)
+      ? candidate.onboarding
+      : { completed: Array.isArray(candidate.transactions) && candidate.transactions.length > 0, completedAt: Array.isArray(candidate.transactions) && candidate.transactions.length > 0 ? new Date().toISOString() : undefined, lastStep: Array.isArray(candidate.transactions) && candidate.transactions.length > 0 ? 'done' : 'welcome' },
+  } as Record<string, unknown>;
+}
+
 export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (!raw || typeof raw !== 'object') throw new Error('Backup não contém um estado válido');
   const candidate = raw as Record<string, unknown>;
@@ -722,7 +769,13 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   if (candidate.schemaVersion === 12) {
     return normalizeState(migrateV12(candidate), fallback);
   }
-  if (candidate.schemaVersion !== 13) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
+  if (candidate.schemaVersion === 13) {
+    return normalizeState(migrateV13(candidate), fallback);
+  }
+  if (candidate.schemaVersion === 14) {
+    return normalizeState(migrateV14(candidate), fallback);
+  }
+  if (candidate.schemaVersion !== 15) throw new Error(`Versão de backup não suportada: ${String(candidate.schemaVersion)}`);
 
   candidate.reconciliationBatches ??= [];
   candidate.plannedTransfers ??= [];
@@ -736,12 +789,32 @@ export function normalizeState(raw: unknown, fallback: AppState): AppState {
   candidate.knowledgeBase ??= [];
   candidate.auditProposals ??= [];
   candidate.aiAuditRuns ??= [];
-  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions', 'financialMemory', 'knowledgeBase', 'auditProposals', 'aiAuditRuns'];
+  candidate.financialObjects ??= [];
+  candidate.behaviorMemory ??= [];
+  candidate.onboarding ??= { completed: false, lastStep: 'welcome' };
+  const requiredArrays = ['accounts', 'transactions', 'imports', 'importIssues', 'categories', 'rules', 'balanceSnapshots', 'reservePolicies', 'plannedEvents', 'reconciliationBatches', 'plannedTransfers', 'insightFeedback', 'reviewGroups', 'reviewDecisions', 'transactionAllocations', 'internalTransferDecisions', 'financialMemory', 'knowledgeBase', 'auditProposals', 'aiAuditRuns', 'financialObjects', 'behaviorMemory'];
   for (const key of requiredArrays) {
     if (!Array.isArray(candidate[key])) throw new Error(`Backup inválido: ${key} não é uma lista`);
   }
 
   const state = candidate as unknown as AppState;
+  if (!state.onboarding || typeof state.onboarding !== 'object' || Array.isArray(state.onboarding)) throw new Error('Backup inválido: onboarding ausente');
+  state.onboarding = {
+    completed: Boolean(state.onboarding.completed),
+    completedAt: typeof state.onboarding.completedAt === 'string' ? state.onboarding.completedAt : undefined,
+    dismissedAt: typeof state.onboarding.dismissedAt === 'string' ? state.onboarding.dismissedAt : undefined,
+    lastStep: ['welcome','privacy','accounts','import','done'].includes(String(state.onboarding.lastStep)) ? state.onboarding.lastStep : 'welcome',
+  };
+  state.financialObjects = state.financialObjects.filter((item) => item && typeof item === 'object' && typeof item.id === 'string' && typeof item.title === 'string').map((item) => ({
+    ...item,
+    transactionIds: Array.isArray(item.transactionIds) ? [...new Set(item.transactionIds.filter((id): id is string => typeof id === 'string'))] : [],
+    plannedEventIds: Array.isArray(item.plannedEventIds) ? [...new Set(item.plannedEventIds.filter((id): id is string => typeof id === 'string'))] : [],
+  }));
+  state.behaviorMemory = state.behaviorMemory.filter((item) => item && typeof item === 'object' && typeof item.id === 'string' && typeof item.title === 'string').map((item) => ({
+    ...item,
+    evidence: Array.isArray(item.evidence) ? item.evidence.filter((entry): entry is string => typeof entry === 'string').slice(0, 20) : [],
+    confirmed: Boolean(item.confirmed),
+  }));
   const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
   const canonicalTimestamp = (value: unknown): string | undefined => {
     if (typeof value !== 'string') return undefined;
@@ -1381,7 +1454,7 @@ function releaseRecoverableLocalSpace(userId: string) {
     // Checkpoints are only a convenience copy. The current state and the
     // Supabase copy are more important, so old checkpoints are the first
     // thing removed when Safari reaches its localStorage quota.
-    localStorage.removeItem(checkpointKey(userId));
+    clearCheckpoints(userId);
   } catch {
     // Storage may be unavailable entirely (private mode / browser policy).
   }
@@ -1430,39 +1503,201 @@ export function saveSyncMetadata(userId: string, metadata: SyncMetadata) {
   writeLocalValueWithQuotaRecovery(userId, syncMetadataKey(userId), JSON.stringify(metadata));
 }
 
-export function createCheckpoint(userId: string, state: AppState, label: string) {
-  const key = checkpointKey(userId);
-  const newest = { label, createdAt: new Date().toISOString(), state };
-  try {
-    const existing = JSON.parse(localStorage.getItem(key) ?? '[]') as Array<{ label: string; createdAt: string; state: AppState }>;
-    const next = [newest, ...existing].slice(0, 2);
+export interface RecoveryCheckpoint {
+  label: string;
+  createdAt: string;
+  transactionCount: number;
+  schemaVersion: number;
+  format: 'gzip' | 'plain' | 'legacy';
+}
 
-    // localStorage costuma ter uma quota pequena no Safari. Checkpoints são
-    // cópias completas do estado, então recebem um orçamento próprio para não
-    // expulsarem o cache principal. Se o estado crescer demais, o checkpoint
-    // opcional é simplesmente dispensado.
-    const checkpointCharacterBudget = 750_000;
-    while (next.length > 0 && JSON.stringify(next).length > checkpointCharacterBudget) next.pop();
-    if (next.length === 0) {
-      localStorage.removeItem(key);
-      return;
-    }
-    localStorage.setItem(key, JSON.stringify(next));
-  } catch (error) {
-    if (!isQuotaExceededError(error)) return;
-    try { localStorage.removeItem(key); } catch { /* cache de recuperação opcional */ }
+interface StoredCheckpointIndex extends RecoveryCheckpoint {
+  payloadKey?: string;
+}
+
+interface LegacyRecoveryCheckpoint {
+  label: string;
+  createdAt: string;
+  state: AppState;
+}
+
+const CHECKPOINT_INDEX_PREFIX = 'japa-finance-checkpoint-index-v0.5';
+const CHECKPOINT_PAYLOAD_PREFIX = 'japa-finance-checkpoint-payload-v0.5';
+const checkpointQueues = new Map<string, Promise<void>>();
+
+function checkpointIndexKey(userId: string) {
+  return `${CHECKPOINT_INDEX_PREFIX}:${userId}`;
+}
+
+function compressedCheckpointKey(userId: string, createdAt: string) {
+  return `${CHECKPOINT_PAYLOAD_PREFIX}:${userId}:${createdAt}`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function compressState(state: AppState): Promise<{ format: 'gzip' | 'plain'; payload: string }> {
+  const json = JSON.stringify(state);
+  if (typeof CompressionStream === 'undefined') return { format: 'plain', payload: json };
+  const stream = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+  const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+  return { format: 'gzip', payload: bytesToBase64(bytes) };
+}
+
+async function decodeCheckpoint(format: 'gzip' | 'plain', payload: string): Promise<unknown> {
+  if (format === 'plain') return JSON.parse(payload);
+  if (typeof DecompressionStream === 'undefined') throw new Error('Este navegador não consegue descompactar o ponto de recuperação. Use um backup JSON exportado.');
+  const bytes = base64ToBytes(payload);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return JSON.parse(await new Response(stream).text());
+}
+
+function checkpointIndex(userId: string): StoredCheckpointIndex[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(checkpointIndexKey(userId)) ?? '[]') as StoredCheckpointIndex[];
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.label === 'string' && typeof item.createdAt === 'string') : [];
+  } catch {
+    return [];
   }
 }
 
-export function exportState(state: AppState) {
+function legacyCheckpoints(userId: string): LegacyRecoveryCheckpoint[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(checkpointKey(userId)) ?? '[]') as LegacyRecoveryCheckpoint[];
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.label === 'string' && typeof item.createdAt === 'string' && item.state) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function listCheckpoints(userId: string): RecoveryCheckpoint[] {
+  const modern = checkpointIndex(userId);
+  const legacy: RecoveryCheckpoint[] = legacyCheckpoints(userId).map((item) => ({
+    label: item.label,
+    createdAt: item.createdAt,
+    transactionCount: item.state.transactions.length,
+    schemaVersion: item.state.schemaVersion,
+    format: 'legacy',
+  }));
+  const seen = new Set(modern.map((item) => item.createdAt));
+  return [...modern, ...legacy.filter((item) => !seen.has(item.createdAt))]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 3);
+}
+
+export function clearCheckpoints(userId: string) {
+  try {
+    for (const item of checkpointIndex(userId)) {
+      if (item.payloadKey) localStorage.removeItem(item.payloadKey);
+    }
+    localStorage.removeItem(checkpointIndexKey(userId));
+    localStorage.removeItem(checkpointKey(userId));
+  } catch { /* armazenamento opcional */ }
+}
+
+export async function restoreCheckpoint(userId: string, createdAt: string, fallback: AppState): Promise<AppState> {
+  const modern = checkpointIndex(userId).find((item) => item.createdAt === createdAt);
+  if (modern?.payloadKey) {
+    const payload = localStorage.getItem(modern.payloadKey);
+    if (!payload) throw new Error('O conteúdo deste ponto de recuperação não está mais disponível.');
+    const raw = await decodeCheckpoint(modern.format === 'gzip' ? 'gzip' : 'plain', payload);
+    return normalizeState(raw, fallback);
+  }
+  const legacy = legacyCheckpoints(userId).find((item) => item.createdAt === createdAt);
+  if (!legacy) throw new Error('Ponto de recuperação não encontrado.');
+  return normalizeState(legacy.state, fallback);
+}
+
+async function persistCompressedCheckpoint(userId: string, state: AppState, label: string) {
+  const createdAt = new Date().toISOString();
+  const encoded = await compressState(state);
+  // Um checkpoint comprimido acima deste limite provavelmente disputará espaço
+  // com o cache principal no Safari. O arquivo JSON exportado continua sendo a
+  // recuperação de longo prazo.
+  if (encoded.payload.length > 1_500_000) return;
+  const payloadKey = compressedCheckpointKey(userId, createdAt);
+  const newest: StoredCheckpointIndex = {
+    label,
+    createdAt,
+    transactionCount: state.transactions.length,
+    schemaVersion: state.schemaVersion,
+    format: encoded.format,
+    payloadKey,
+  };
+  const previous = checkpointIndex(userId);
+  const next = [newest, ...previous].slice(0, 2);
+  try {
+    localStorage.setItem(payloadKey, encoded.payload);
+    localStorage.setItem(checkpointIndexKey(userId), JSON.stringify(next));
+    for (const removed of previous.filter((item) => !next.some((kept) => kept.createdAt === item.createdAt))) {
+      if (removed.payloadKey) localStorage.removeItem(removed.payloadKey);
+    }
+    // A versão comprimida substitui os checkpoints completos legados, que eram
+    // grandes demais para estados com centenas de movimentos.
+    localStorage.removeItem(checkpointKey(userId));
+  } catch (error) {
+    try { localStorage.removeItem(payloadKey); } catch { /* opcional */ }
+    if (isQuotaExceededError(error)) {
+      const oldest = previous.at(-1);
+      if (oldest?.payloadKey) {
+        try {
+          localStorage.removeItem(oldest.payloadKey);
+          localStorage.setItem(payloadKey, encoded.payload);
+          localStorage.setItem(checkpointIndexKey(userId), JSON.stringify([newest, ...previous.filter((item) => item.createdAt !== oldest.createdAt)].slice(0, 2)));
+          return;
+        } catch { /* sem espaço mesmo após remover o mais antigo */ }
+      }
+    }
+  }
+}
+
+export function createCheckpoint(userId: string, state: AppState, label: string) {
+  const previous = checkpointQueues.get(userId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => persistCompressedCheckpoint(userId, state, label));
+  let queued: Promise<void>;
+  queued = next.finally(() => {
+    if (checkpointQueues.get(userId) === queued) checkpointQueues.delete(userId);
+  });
+  checkpointQueues.set(userId, queued);
+}
+
+export async function exportState(state: AppState): Promise<'shared' | 'downloaded'> {
   try { localStorage.setItem('japa-finance-last-export-at', new Date().toISOString()); } catch { /* metadado opcional */ }
   const payload = { schemaVersion: state.schemaVersion, exportedAt: new Date().toISOString(), state };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const fileName = `japa-finance-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const contents = JSON.stringify(payload, null, 2);
+  const file = new File([contents], fileName, { type: 'application/json' });
+  const shareNavigator = navigator as Navigator & { canShare?: (data?: ShareData) => boolean };
+  if (navigator.share && (!shareNavigator.canShare || shareNavigator.canShare({ files: [file] }))) {
+    try {
+      await navigator.share({ title: 'Backup do Japa Finance', files: [file] });
+      return 'shared';
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return 'shared';
+    }
+  }
+  const blob = new Blob([contents], { type: 'application/json' });
   const anchor = document.createElement('a');
   anchor.href = URL.createObjectURL(blob);
-  anchor.download = `japa-finance-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(anchor.href);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(anchor.href), 0);
+  return 'downloaded';
 }
 
 export async function parseBackupFile(file: File, fallback: AppState): Promise<AppState> {

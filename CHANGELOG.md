@@ -1,3 +1,28 @@
+## 0.9.0-alpha.9 - 2026-08-02
+
+- motor formal de conhecimento e grafo financeiro derivado;
+- explicações universais para cálculos e relações;
+- qualidade por dimensão e por conta;
+- auditoria contínua determinística;
+- timeline ampliada, detecção de mudanças e insights contextuais;
+- memória comportamental persistente;
+- objetos financeiros e eventos compostos;
+- onboarding e importação guiada;
+- painel de segurança e recuperação;
+- checkpoints locais comprimidos, testados com 994 movimentos;
+- IA opcional subordinada ao contexto calculado;
+- schema interno 15, sem migration SQL nova;
+- cache PWA atualizado para alpha9.
+
+## 0.9.0-alpha.8.1 - 2026-08-02
+
+- migra backups schema 13 com componentes de taxa reclassificados incorretamente;
+- exportação usa a folha de compartilhamento do iPhone e mantém download como fallback;
+- conflito de sincronização ganhou ações explícitas para nuvem, dispositivo e exportação;
+- campo de pergunta deixou de usar sticky e fica ancorado no rodapé útil da tela;
+- páginas retornam ao topo ao trocar aba ou moeda;
+- nomes de contraparte removem prefixos bancários `To`, `From` e `Para`.
+
 # Changelog
 
 ## 0.9.0-alpha.8 - 2026-08-02

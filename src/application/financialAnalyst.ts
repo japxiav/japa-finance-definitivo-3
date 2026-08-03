@@ -5,6 +5,11 @@ import { buildDataHealthReport } from './dataHealth';
 import { buildFinancialHistory, buildMonthlyFinancialStories } from './financialHistory';
 import { buildFinancialRelationships } from './financialRelationships';
 import { buildRelationshipIntelligence } from './relationshipIntelligence';
+import { buildKnowledgeSnapshot } from './knowledgeEngine';
+import { buildChangeSignals } from './changeDetection';
+import { buildContinuousAudit } from './continuousAudit';
+import { buildBehaviorObservations } from './behaviorMemory';
+import { buildFinancialEvents } from './financialEvents';
 
 export interface FinancialAnalystContext {
   generatedAt: string;
@@ -62,6 +67,12 @@ export interface FinancialAnalystContext {
   history: Array<{ date: string; type: string; title: string; detail: string; evidence: string[] }>;
   planned: Array<{ title: string; amountCents: number; dueDate: string; direction: string; active: boolean }>;
   memory: Array<{ name: string; relationship: string; note?: string; validFrom?: string; validUntil?: string }>;
+  knowledge: { nodeCounts: Record<string, number>; edgeCount: number; unresolvedEntityCount: number };
+  changes: Array<{ title: string; explanation: string; impactCents?: number; direction: string; confidence: string; evidence: string[] }>;
+  financialObjects: Array<{ type: string; title: string; status: string; transactionCount: number; plannedEventCount: number; expectedCents?: number }>;
+  behaviorMemory: Array<{ title: string; summary: string; confidence: string; confirmed: boolean; evidence: string[] }>;
+  financialEvents: Array<{ type: string; title: string; date: string; confidence: string; lineCount: number; feeCents: number }>;
+  continuousAudit: { status: string; criticalCount: number; warningCount: number; issues: Array<{ severity: string; title: string; explanation: string; evidence: string[] }> };
 }
 
 export function buildFinancialAnalystContext(state: AppState, currency: string): FinancialAnalystContext {
@@ -74,6 +85,11 @@ export function buildFinancialAnalystContext(state: AppState, currency: string):
     && !item.transferGroupId).length;
   const categoryById = new Map(state.categories.map((item) => [item.id, item.name]));
   const health = buildDataHealthReport(state);
+  const knowledge = buildKnowledgeSnapshot(state);
+  const changes = buildChangeSignals(state, currency);
+  const continuousAudit = buildContinuousAudit(state);
+  const behavior = buildBehaviorObservations(state, currency);
+  const financialEvents = buildFinancialEvents(state).filter((event) => event.currencies.includes(currency));
   return {
     generatedAt: new Date().toISOString(),
     currency,
@@ -168,6 +184,12 @@ export function buildFinancialAnalystContext(state: AppState, currency: string):
       validFrom: item.validFrom,
       validUntil: item.validUntil,
     })),
+    knowledge: { nodeCounts: knowledge.counts, edgeCount: knowledge.edges.length, unresolvedEntityCount: knowledge.unresolvedEntityCount },
+    changes: changes.slice(0, 15).map((item) => ({ title: item.title, explanation: item.explanation, impactCents: item.impactCents, direction: item.direction, confidence: item.confidence, evidence: item.evidence })),
+    financialObjects: state.financialObjects.filter((item) => item.currency === currency && item.status !== 'archived').slice(0, 30).map((item) => ({ type: item.type, title: item.title, status: item.status, transactionCount: item.transactionIds.length, plannedEventCount: item.plannedEventIds.length, expectedCents: item.expectedCents })),
+    behaviorMemory: behavior.slice(0, 20).map((item) => ({ title: item.title, summary: item.summary, confidence: item.confidence, confirmed: item.saved, evidence: item.evidence })),
+    financialEvents: financialEvents.slice(0, 30).map((item) => ({ type: item.type, title: item.title, date: item.reportingDate, confidence: item.confidence, lineCount: item.transactionIds.length, feeCents: item.totalFeeCents })),
+    continuousAudit: { status: continuousAudit.status, criticalCount: continuousAudit.criticalCount, warningCount: continuousAudit.warningCount, issues: continuousAudit.issues.slice(0, 20).map((item) => ({ severity: item.severity, title: item.title, explanation: item.explanation, evidence: item.evidence })) },
   };
 }
 

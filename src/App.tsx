@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   BadgeCheck,
   Building2,
+  Brain,
   CalendarClock,
   ChevronRight,
   ChartNoAxesCombined,
@@ -67,6 +68,10 @@ import { FinancialRelationshipsPanel } from './components/FinancialRelationships
 import { FinancialHistoryPanel } from './components/FinancialHistoryPanel';
 import { FinancialAnalystPanel } from './components/FinancialAnalystPanel';
 import { AiAuditPanel } from './components/AiAuditPanel';
+import { KnowledgeCenterPanel } from './components/KnowledgeCenterPanel';
+import { SecurityRecoveryPanel } from './components/SecurityRecoveryPanel';
+import { ImportGuideModal } from './components/ImportGuideModal';
+import { OnboardingModal } from './components/OnboardingModal';
 import { TransactionDetailsSheet } from './components/TransactionDetailsSheet';
 import { AuditProposalConfirmModal } from './components/AuditProposalConfirmModal';
 import { createConfirmedBatch, getUndoImpact, restoreImport, undoImport } from './core/imports';
@@ -95,6 +100,9 @@ import {
   resolveIssues,
   saveLocalState,
   saveSyncMetadata,
+  listCheckpoints,
+  restoreCheckpoint,
+  clearCheckpoints,
 } from './core/storage';
 import type {
   Account,
@@ -109,6 +117,7 @@ import type {
   TechnicalMovementType,
   OwnerIdentityProfile,
   AuditProposal,
+  FinancialObjectType,
 } from './core/types';
 import { initialState } from './data/defaults';
 import { applyCategoryDecision, deferReviewGroup, reopenReviewGroup, undoLatestReviewDecision } from './classification/decisions';
@@ -123,6 +132,15 @@ import {
 import { addCivilDays, civilDaysBetween, isCivilDate } from './domain/dates';
 import { buildTodayActivity } from './application/todayActivity';
 import { buildDataHealthReport } from './application/dataHealth';
+import { buildKnowledgeSnapshot } from './application/knowledgeEngine';
+import { buildChangeSignals } from './application/changeDetection';
+import { buildContextualInsights } from './application/contextualInsights';
+import { buildBehaviorObservations, saveBehaviorObservation, dismissBehaviorObservation } from './application/behaviorMemory';
+import { buildFinancialObjectSuggestions, acceptFinancialObjectSuggestion, archiveFinancialObject, createFinancialObject } from './application/financialObjects';
+import { buildFinancialEvents } from './application/financialEvents';
+import { buildContinuousAudit } from './application/continuousAudit';
+import { explainExternalFlow, explainTopRelationship } from './application/explanationEngine';
+import { buildRuntimeSecurityStatus } from './application/securityStatus';
 import { createMemoryEntity } from './application/financialMemory';
 import { buildFinancialRelationships, buildRelationshipTimeline, topRelationshipReceivers, topRelationshipSenders, type FinancialRelationshipSummary } from './application/financialRelationships';
 import { buildRelationshipIntelligence, buildRelationshipOverviewInsights } from './application/relationshipIntelligence';
@@ -318,6 +336,7 @@ function FinanceApp({ session }: { session: Session }) {
   const [reconciliationOpen, setReconciliationOpen] = useState(false);
   const [reserveOpen, setReserveOpen] = useState(false);
   const [plannedEventOpen, setPlannedEventOpen] = useState(false);
+  const [importGuideOpen, setImportGuideOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [merchantLearning, setMerchantLearning] = useState<{ transaction: Transaction; category: Category } | null>(null);
   const [categoryFilter, setCategoryFilter] = useState('all');
@@ -335,7 +354,7 @@ function FinanceApp({ session }: { session: Session }) {
   const [aiAuditBusy, setAiAuditBusy] = useState(false);
   const [pendingAuditProposal, setPendingAuditProposal] = useState<AuditProposal | null>(null);
   const [discoveriesView, setDiscoveriesView] = useState<'now' | 'opportunity' | 'patterns'>('now');
-  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'history' | 'accounts' | 'review' | 'health' | 'relationships' | 'ai'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'transactions' | 'planning' | 'discoveries' | 'assistant' | 'history' | 'knowledge' | 'accounts' | 'review' | 'health' | 'relationships' | 'ai' | 'security'>('home');
   const [assistantTargetAccountId, setAssistantTargetAccountId] = useState('');
   const input = useRef<HTMLInputElement | null>(null);
   const backupInput = useRef<HTMLInputElement | null>(null);
@@ -348,6 +367,13 @@ function FinanceApp({ session }: { session: Session }) {
   const latestState = useRef<AppState | null>(null);
   const activeInstance = useRef(true);
   const categoryMutationLock = useRef(new Set<string>());
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const page = document.querySelector<HTMLElement>('.app-shell > section:not(.error-banner), .app-shell > .discoveries-page, .app-shell > .assistant-page, .app-shell > .settings-page, .app-shell > .review-page, .app-shell > .health-page, .app-shell > .memory-page, .app-shell > .ai-audit-page, .app-shell > .financial-history-page, .app-shell > .knowledge-center-page, .app-shell > .security-recovery-page');
+      page?.scrollTo({ top: 0, behavior: 'auto' });
+    });
+  }, [activeTab, currency]);
 
   useEffect(() => () => {
     activeInstance.current = false;
@@ -1171,6 +1197,64 @@ function FinanceApp({ session }: { session: Session }) {
     setActiveTab('transactions');
   }
 
+  function openTransactionsByIds(transactionIds: string[]) {
+    setQuery('');
+    setRelationshipFilter({ name: 'Evidências', transactionIds: [...new Set(transactionIds)] });
+    setTechnicalTypeFilter('all');
+    setDirectionFilter('all');
+    setCategoryFilter('all');
+    setDateStart('');
+    setDateEnd('');
+    setMonth('all');
+    setActiveTab('transactions');
+  }
+
+  function acceptObjectSuggestion(suggestion: ReturnType<typeof buildFinancialObjectSuggestions>[number]) {
+    createCheckpoint(userId, financeState, `Antes de criar objeto ${suggestion.title}`);
+    setState(acceptFinancialObjectSuggestion(financeState, suggestion));
+  }
+
+  function createManualFinancialObject(input: { type: FinancialObjectType; title: string; currency: string; notes?: string }) {
+    createCheckpoint(userId, financeState, `Antes de criar objeto ${input.title}`);
+    setState(createFinancialObject(financeState, input));
+  }
+
+  function archiveObjectById(id: string) {
+    const object = financeState.financialObjects.find((item) => item.id === id);
+    if (!object) return;
+    createCheckpoint(userId, financeState, `Antes de arquivar objeto ${object.title}`);
+    setState(archiveFinancialObject(financeState, id));
+  }
+
+  function confirmBehavior(observation: ReturnType<typeof buildBehaviorObservations>[number]) {
+    createCheckpoint(userId, financeState, `Antes de guardar memória ${observation.title}`);
+    setState(saveBehaviorObservation(financeState, observation));
+  }
+
+  function ignoreBehavior(observation: ReturnType<typeof buildBehaviorObservations>[number]) {
+    setState(dismissBehaviorObservation(financeState, observation));
+  }
+
+  async function restoreLocalCheckpoint(createdAt: string) {
+    if (!window.confirm('Restaurar este ponto de recuperação? O estado atual será preservado em um novo checkpoint.')) return;
+    try {
+      createCheckpoint(userId, financeState, 'Estado atual antes de restaurar ponto local');
+      const replacement = await restoreCheckpoint(userId, createdAt, initialState);
+      setState(replacement);
+      setError('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Não foi possível restaurar o ponto local.');
+    }
+  }
+
+  function completeOnboarding() {
+    setState({ ...financeState, onboarding: { completed: true, completedAt: new Date().toISOString(), lastStep: 'done' } });
+  }
+
+  function dismissOnboarding() {
+    setState({ ...financeState, onboarding: { ...financeState.onboarding, dismissedAt: new Date().toISOString() } });
+  }
+
   function saveTransferDetail(result: TransferDetailResult) {
     if (!transferDetailTransaction) return;
     const transactionId = transferDetailTransaction.id;
@@ -1231,7 +1315,12 @@ function FinanceApp({ session }: { session: Session }) {
       const replacement = await parseBackupFile(file, initialState);
       if (!window.confirm('Substituir os dados atuais por este backup? Um checkpoint local será criado antes.')) return;
       createCheckpoint(userId, financeState, 'Antes de restaurar backup JSON');
+      saveLocalState(userId, replacement);
       setState(replacement);
+      if (syncConflict) {
+        setSyncConflict((current) => current ? { ...current, localState: replacement } : current);
+        setSyncState('conflict');
+      }
       setError('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Backup inválido.');
@@ -1510,6 +1599,28 @@ function FinanceApp({ session }: { session: Session }) {
     .slice(0, 5);
   const todayActivity = buildTodayActivity(financeState, currency, today);
   const healthReport = buildDataHealthReport(financeState);
+  const knowledgeSnapshot = buildKnowledgeSnapshot(financeState);
+  const changeSignals = buildChangeSignals(financeState, currency, today);
+  const contextualInsights = buildContextualInsights(financeState, currency);
+  const behaviorObservations = buildBehaviorObservations(financeState, currency);
+  const financialObjectSuggestions = buildFinancialObjectSuggestions(financeState, currency);
+  const financialEvents = buildFinancialEvents(financeState);
+  const continuousAudit = buildContinuousAudit(financeState);
+  const explanationCards = [
+    explainExternalFlow(financeState, currency, range),
+    explainTopRelationship(financeState, currency, 'sent'),
+  ].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const recoveryCheckpoints = listCheckpoints(userId);
+  const runtimeSecurity = buildRuntimeSecurityStatus({
+    state: financeState,
+    userId,
+    supabaseConfigured,
+    // FinanceApp só é montado depois que o portão de acesso autorizou a sessão.
+    accessAuthorized: true,
+    syncMode: syncState,
+    aiConfigured: import.meta.env.VITE_OPENAI_ENABLED === 'true',
+  });
+  const syncMetadata = loadSyncMetadata(userId);
   const financialRelationships = buildFinancialRelationships(financeState, currency);
   const relationshipTimeline = buildRelationshipTimeline(financeState, currency);
   const relationshipIntelligence = Object.fromEntries(financialRelationships.map((item) => [item.key, buildRelationshipIntelligence(financeState, item, financialRelationships)]));
@@ -1614,7 +1725,7 @@ function FinanceApp({ session }: { session: Session }) {
         <span className="eyebrow">INSIGHTS</span>
         <h1>Contexto que<br />leva a uma ação.</h1>
         <p>Um insight só aparece quando muda uma decisão ou aumenta de verdade a compreensão. O óbvio não ganha cartão só porque veio acompanhado de porcentagem.</p>
-        <div className="insights-hub-actions"><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={17}/> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={17}/> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={17}/> Auditoria</button></div>
+        <div className="insights-hub-actions"><button type="button" className="secondary" onClick={() => setActiveTab('knowledge')}><Brain size={17}/> Central de compreensão</button><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={17}/> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={17}/> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={17}/> Auditoria</button></div>
         <nav className="discoveries-tabs" aria-label="Tipos de insights"><button type="button" className={discoveriesView === 'now' ? 'active' : ''} onClick={() => setDiscoveriesView('now')}>Agora <span>{nowImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'opportunity' ? 'active' : ''} onClick={() => setDiscoveriesView('opportunity')}>Oportunidades <span>{opportunityImpactInsights.length}</span></button><button type="button" className={discoveriesView === 'patterns' ? 'active' : ''} onClick={() => setDiscoveriesView('patterns')}>Padrões <span>{insightResult.insights.length}</span></button></nav>
 
         {discoveriesView === 'now' && <div className="impact-stack">{nowImpactInsights.length ? nowImpactInsights.map((insight) => <ImpactInsightCard key={insight.id} insight={insight} onAction={openImpactAction} />) : <section className="panel empty compact-empty"><BadgeCheck size={30} /><p>Nenhuma ação urgente identificada com os dados atuais.</p></section>}</div>}
@@ -1648,6 +1759,37 @@ function FinanceApp({ session }: { session: Session }) {
         }
       }} />}
 
+      {activeTab === 'knowledge' && <KnowledgeCenterPanel
+        currency={currency}
+        knowledge={knowledgeSnapshot}
+        insights={contextualInsights}
+        changes={changeSignals}
+        objects={financeState.financialObjects}
+        objectSuggestions={financialObjectSuggestions}
+        behaviorObservations={behaviorObservations}
+        events={financialEvents}
+        audit={continuousAudit}
+        explanations={explanationCards}
+        rules={financeState.rules}
+        acceptObject={acceptObjectSuggestion}
+        createObject={createManualFinancialObject}
+        archiveObject={archiveObjectById}
+        saveBehavior={confirmBehavior}
+        dismissBehavior={ignoreBehavior}
+        openTransactions={openTransactionsByIds}
+        openRules={() => setCategoryOpen(true)}
+      />}
+
+      {activeTab === 'security' && <SecurityRecoveryPanel
+        security={runtimeSecurity}
+        checkpoints={recoveryCheckpoints}
+        exportBackup={() => { void exportState(financeState); }}
+        importBackup={() => backupInput.current?.click()}
+        restore={restoreLocalCheckpoint}
+        clear={() => { if (window.confirm('Apagar os pontos de recuperação locais? O backup na nuvem e os arquivos exportados não serão apagados.')) { clearCheckpoints(userId); setState({ ...financeState }); } }}
+        lastRemoteUpdate={syncMetadata?.remoteUpdatedAt}
+      />}
+
       {activeTab === 'accounts' && <section className="settings-page">
         <span className="eyebrow">MAIS</span><h1>Contas, dados<br />e controle.</h1>
 
@@ -1659,13 +1801,14 @@ function FinanceApp({ session }: { session: Session }) {
 
         <section className="panel integrity-panel"><div className="panel-title"><div><small>INTEGRIDADE VISÍVEL</small><h2>Quanto o aplicativo realmente sabe</h2></div><ShieldCheck size={20} /></div><div className="integrity-grid"><span><small>Saldo</small><b>{balanceConfidenceLabel}</b></span><span><small>Histórico disponível</small><b>{currencyHistoryStart && currencyHistoryEnd ? `${formatReportingDate(currencyHistoryStart)} a ${formatReportingDate(currencyHistoryEnd)}` : 'sem dados'}</b></span><span><small>Pendências críticas</small><b>{criticalPendingCount}</b></span><span><small>Pares internos sugeridos</small><b>{internalTransferSuggestions.length}</b></span><span><small>Conversões sem par</small><b>{unpairedConversionCount}</b></span><span><small>Detalhamentos</small><b>{financeState.transactionAllocations.filter((allocation) => financeState.transactions.some((transaction) => transaction.id === allocation.transactionId && transaction.currency === currency)).length}</b></span></div></section>
 
-        <div className="import-card"><label className="import-fallback-label"><span>Destino de apoio para arquivos genéricos</span><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>{account.name} · {institutionName(account.institution)}</option>)}</select></label><button type="button" onClick={() => input.current?.click()}><Upload size={18} /> Importar extrato bancário</button><small>Wise e Revolut são detectados e separados automaticamente por instituição, moeda e produto. O destino acima só é usado quando o arquivo realmente não traz essa informação.</small></div>
-        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => setActiveTab('health')}><ShieldCheck size={18} /> Saúde da base ({healthReport.score})</button><button type="button" className="secondary" onClick={() => setActiveTab('relationships')}><Layers3 size={18} /> Relacionamentos financeiros</button><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={18} /> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={18} /> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={18} /> Auditoria inteligente</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Baixar backup</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><RotateCcw size={18} /> Restaurar backup</button></div>
+        <div className="import-card"><label className="import-fallback-label"><span>Destino de apoio para arquivos genéricos</span><select value={importAccountId} onChange={(event) => setImportAccountId(event.target.value)}>{activeAccounts.filter((account) => account.institution === 'revolut' || account.institution === 'wise').map((account) => <option key={account.id} value={account.id}>{account.name} · {institutionName(account.institution)}</option>)}</select></label><button type="button" onClick={() => setImportGuideOpen(true)}><Upload size={18} /> Importar extrato bancário</button><small>Wise e Revolut são detectados e separados automaticamente por instituição, moeda e produto. O destino acima só é usado quando o arquivo realmente não traz essa informação.</small></div>
+        <section className="panel backup-panel"><div className="panel-title"><div><small>DADOS E BACKUP</small><h2>Leve seus dados sem depender do aparelho</h2></div><Cloud size={20} /></div><p>Exporte uma cópia completa para o aplicativo Arquivos ou importe um backup salvo anteriormente. No iPhone, escolha <b>Salvar em Arquivos</b> na folha de compartilhamento.</p><div className="backup-actions"><button type="button" className="secondary" onClick={() => exportState(financeState)}><Download size={18} /> Exportar backup (.json)</button><button type="button" className="secondary" onClick={() => backupInput.current?.click()}><Upload size={18} /> Importar backup do dispositivo</button></div></section>
+        <div className="settings-actions"><button type="button" className="secondary" onClick={() => setManualOpen(true)}><Plus size={18} /> Nova movimentação</button><button type="button" className="secondary" onClick={() => setCategoryOpen(true)}><Tags size={18} /> Categorias e comerciantes</button><button type="button" className="secondary" onClick={recordBalanceSnapshot}><WalletCards size={18} /> Atualizar saldos</button><button type="button" className="secondary" onClick={() => setReserveOpen(true)}><Sparkles size={18} /> Reserva mínima</button><button type="button" className="secondary" onClick={() => setPlannedEventOpen(true)}><CalendarClock size={18} /> Planejar compromisso</button><button type="button" className="secondary" onClick={() => setActiveTab('review')}><TriangleAlert size={18} /> Revisar pendências {pendingCount + internalTransferSuggestions.length > 0 ? `(${pendingCount + internalTransferSuggestions.length})` : ''}</button><button type="button" className="secondary" onClick={() => setAccountOpen(true)}><Landmark size={18} /> Gerenciar contas</button><button type="button" className="secondary" onClick={() => setIdentityOpen(true)}><BadgeCheck size={18} /> Identidade própria</button><button type="button" className="secondary" onClick={() => setActiveTab('health')}><ShieldCheck size={18} /> Saúde da base ({healthReport.score})</button><button type="button" className="secondary" onClick={() => setActiveTab('knowledge')}><Brain size={18} /> Central de compreensão</button><button type="button" className="secondary" onClick={() => setActiveTab('security')}><Cloud size={18} /> Segurança e recuperação</button><button type="button" className="secondary" onClick={() => setActiveTab('relationships')}><Layers3 size={18} /> Relacionamentos financeiros</button><button type="button" className="secondary" onClick={() => setActiveTab('history')}><History size={18} /> História financeira</button><button type="button" className="secondary" onClick={() => setActiveTab('assistant')}><MessageSquare size={18} /> Perguntar aos números</button><button type="button" className="secondary" onClick={() => setActiveTab('ai')}><WandSparkles size={18} /> Auditoria inteligente</button><button type="button" className="secondary" onClick={() => downloadContextDiagnostic(financeState)}><FileDown size={18} /> Exportar diagnóstico</button></div>
         <section className="panel imports"><div className="panel-title"><h3>Importações recentes</h3><Settings size={18} /></div>{financeState.imports.length ? financeState.imports.slice(0, 10).map((batch) => <div className={batch.status === 'undone' ? 'undone' : ''} key={batch.id}><div><b>{batch.fileName}</b><small>{(batch.accountIds?.length ?? 1) > 1 ? `${batch.accountIds!.length} contas` : accountName(batch.accountId)} · {batch.imported} importadas · {batch.rejected} rejeitadas</small></div><button type="button" title={batch.status === 'undone' ? 'Restaurar lote' : 'Anular lote'} onClick={() => toggleImport(batch.id)}><RotateCcw size={15} /></button></div>) : <p className="muted">Nenhum extrato importado ainda.</p>}</section>
         <section className="panel activity-panel"><div className="panel-title"><div><small>RASTREABILIDADE</small><h2>Linha do tempo de alterações</h2></div><History size={20} /></div>{activityTimeline.length ? <div className="activity-list">{activityTimeline.map((item) => <article className={item.undone ? 'undone' : ''} key={item.id}><i /><div><b>{item.title}</b><small>{item.detail}</small><time>{new Date(item.occurredAt).toLocaleString('pt-BR')}</time></div></article>)}</div> : <p className="muted">As próximas importações, reconciliações, classificações e planejamentos aparecerão aqui.</p>}</section>
       </section>}
 
-      {activeTab === 'health' && <DataHealthPanel report={healthReport} onOpenReview={() => setActiveTab('review')} onReprocess={() => {
+      {activeTab === 'health' && <DataHealthPanel report={healthReport} accounts={financeState.accounts} onOpenReview={() => setActiveTab('review')} onReprocess={() => {
         const proposal = buildDeterministicAuditProposals(financeState).find((item) => item.payload.action === 'reprocess_all');
         if (!proposal) { setError('Nenhuma classificação automática precisa ser atualizada.'); return; }
         setPendingAuditProposal(proposal);
@@ -1693,11 +1836,14 @@ function FinanceApp({ session }: { session: Session }) {
         {reviewTransactions.length > 0 && renderTransactions(reviewTransactions.filter((item) => item.currency === currency), true)}
       </>}</section>}
 
+      {importGuideOpen && <ImportGuideModal close={() => setImportGuideOpen(false)} continueImport={() => { setImportGuideOpen(false); window.setTimeout(() => input.current?.click(), 0); }} />}
+      {!financeState.onboarding.completed && !financeState.onboarding.dismissedAt && <OnboardingModal complete={completeOnboarding} dismiss={dismissOnboarding} startImport={() => setImportGuideOpen(true)} />}
+
       <input ref={input} hidden type="file" accept=".csv,.pdf,text/csv,application/pdf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && onFile(event.target.files[0])} />
       <input ref={backupInput} hidden type="file" accept=".json,application/json" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && restoreBackup(event.target.files[0])} />
-      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={['discoveries','assistant','history','ai'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Insights</span></button><button type="button" className={['accounts','review','health','relationships'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
+      <nav className="bottom-nav"><button type="button" className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')}><Home size={20} /><span>Início</span></button><button type="button" className={activeTab === 'transactions' ? 'active' : ''} onClick={() => setActiveTab('transactions')}><List size={20} /><span>Movimentos</span></button><button type="button" className={activeTab === 'planning' ? 'active' : ''} onClick={() => setActiveTab('planning')}><CalendarClock size={20} /><span>Planejar</span></button><button type="button" className={['discoveries','assistant','history','knowledge','ai'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('discoveries')}><Lightbulb size={20} /><span>Insights</span></button><button type="button" className={['accounts','review','health','relationships','security'].includes(activeTab) ? 'active' : ''} onClick={() => setActiveTab('accounts')}><Settings size={20} /><span>Mais</span></button></nav>
 
-      {syncConflict && <SyncConflictModal conflict={syncConflict} busy={conflictBusy} message={error} exportLocal={() => exportState(syncConflict.localState)} keepLocal={keepLocalConflictVersion} useRemote={useRemoteConflictVersion} />}
+      {syncConflict && <SyncConflictModal conflict={syncConflict} busy={conflictBusy} message={error} exportLocal={() => exportState(syncConflict.localState)} importDevice={() => backupInput.current?.click()} keepLocal={keepLocalConflictVersion} useRemote={useRemoteConflictVersion} />}
       {preview && <ImportPreview preview={preview} includePossibleDuplicates={includePossibleDuplicates} setIncludePossibleDuplicates={setIncludePossibleDuplicates} allowPartial={allowPartial} setAllowPartial={setAllowPartial} close={() => setPreview(null)} confirm={confirmImport} />}
       {manualOpen && <ManualModal accounts={activeAccounts} categories={financeState.categories} close={() => setManualOpen(false)} add={(transaction) => { createCheckpoint(userId, financeState, 'Antes de transação manual'); setState(withRebuiltReviewGroups({ ...financeState, transactions: [transaction, ...financeState.transactions] })); setManualOpen(false); }} />}
       {accountOpen && <AccountModal
@@ -1837,11 +1983,12 @@ function ReconciliationModal({ accounts, currency, close, confirm }: {
   </section></div>;
 }
 
-function SyncConflictModal({ conflict, busy, message, exportLocal, keepLocal, useRemote }: {
+function SyncConflictModal({ conflict, busy, message, exportLocal, importDevice, keepLocal, useRemote }: {
   conflict: SyncConflict;
   busy: boolean;
   message: string;
-  exportLocal: () => void;
+  exportLocal: () => void | Promise<unknown>;
+  importDevice: () => void;
   keepLocal: () => void;
   useRemote: () => void;
 }) {
@@ -1854,14 +2001,15 @@ function SyncConflictModal({ conflict, busy, message, exportLocal, keepLocal, us
     <p>{conflict.reason === 'startup' ? 'Este aparelho e a nuvem têm alterações diferentes.' : 'Outro aparelho alterou a nuvem antes deste salvamento.'} Escolha conscientemente qual versão continuará ativa. Um checkpoint local será criado antes de qualquer substituição.</p>
     <div className="conflict-grid">
       <article><small>ESTE APARELHO</small><strong>{localTransactions} transações</strong><span>{conflict.localState.imports.length} importações</span></article>
-      <article><small>NUVEM · REVISÃO {conflict.remote.revision}</small><strong>{remoteTransactions} transações</strong><span>Atualizada em {remoteUpdated}</span></article>
+      <article><small>BACKUP DA NUVEM</small><strong>{remoteTransactions} transações</strong><span>Atualizado em {remoteUpdated}</span><details className="conflict-technical-details"><summary>Detalhes técnicos</summary><code>revisão {conflict.remote.revision}</code></details></article>
     </div>
     {message && <div className="form-message error">{message}</div>}
-    <div className="conflict-note"><CircleAlert size={18} /><span>O aplicativo não tenta mesclar transações automaticamente porque uma fusão errada seria só perda de dados usando gravata.</span></div>
+    <div className="conflict-note"><CircleAlert size={18} /><span>O aplicativo não mescla versões automaticamente. Em dados financeiros, pedir confirmação é mais seguro do que arriscar uma fusão incorreta.</span></div>
     <footer className="conflict-actions">
-      <button type="button" className="secondary" disabled={busy} onClick={exportLocal}><Download size={17} />Baixar backup local</button>
-      <button type="button" className="secondary" disabled={busy} onClick={useRemote}>Usar versão da nuvem</button>
-      <button type="button" disabled={busy} onClick={keepLocal}>{busy ? <RefreshCw className="spin" size={17} /> : null}Manter este aparelho</button>
+      <button type="button" className="secondary" disabled={busy} onClick={exportLocal}><Download size={17} />Exportar cópia deste aparelho (.json)</button>
+      <button type="button" className="secondary" disabled={busy} onClick={importDevice}><Upload size={17} />Importar backup do dispositivo</button>
+      <button type="button" className="secondary" disabled={busy} onClick={useRemote}><Cloud size={17} />Restaurar backup da nuvem</button>
+      <button type="button" disabled={busy} onClick={keepLocal}>{busy ? <RefreshCw className="spin" size={17} /> : null}Manter dados deste aparelho</button>
     </footer>
   </section></div>;
 }

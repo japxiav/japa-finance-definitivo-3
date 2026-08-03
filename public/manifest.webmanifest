@@ -1,7 +1,7 @@
 {
   "name": "Japa Finance",
   "short_name": "Japa Finance",
-  "description": "Finanças pessoais com reconciliação e decisões auditáveis.",
+  "description": "Sistema pessoal de compreensão financeira com importação auditável, memória, insights e recuperação.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

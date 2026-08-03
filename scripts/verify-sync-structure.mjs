@@ -21,7 +21,7 @@ check('SYNC-STRUCT-004', 'upsert cego foi removido', !remote.includes('.upsert('
 check('SYNC-STRUCT-005', 'conflito remoto possui erro próprio', remote.includes('class RemoteStateConflictError'));
 check('SYNC-STRUCT-006', 'hash usa serialização canônica', sync.includes('canonicalStringify') && sync.includes('.sort('));
 check('SYNC-STRUCT-007', 'interface possui modal de conflito', app.includes('function SyncConflictModal'));
-check('SYNC-STRUCT-008', 'interface oferece backup local', app.includes('Baixar backup local'));
+check('SYNC-STRUCT-008', 'interface oferece backup local', app.includes('Exportar backup') && app.includes('Importar backup'));
 check('SYNC-STRUCT-009', 'banco exige incremento unitário', migration.includes('revision must increase by exactly one'));
 check('SYNC-STRUCT-010', 'testes de decisão existem', existsSync(resolve(root, 'src/core/sync.test.ts')));
 check('SYNC-STRUCT-011', 'testes de compare-and-swap existem', existsSync(resolve(root, 'src/core/remoteState.test.ts')));

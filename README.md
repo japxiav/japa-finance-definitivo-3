@@ -1,331 +1,74 @@
-# Japa Finance v0.9 Alpha 8 — Compreensão Financeira
+# Japa Finance v0.9 Alpha 9 — Compreensão Financeira
 
-A Alpha 8 acrescenta a camada que faltava depois do Relationship Engine: o aplicativo passa a responder perguntas objetivas, reconstruir mudanças observáveis da vida financeira e oferecer interpretação por IA sem entregar à IA o controle do livro. Transferências continuam completas sem categoria ou finalidade. O núcleo financeiro segue determinístico e funciona integralmente sem chave da OpenAI.
+A Alpha 9 reúne em um único produto o núcleo financeiro determinístico, a central de conhecimento, explicações auditáveis, memória comportamental, objetos financeiros, auditoria contínua, recuperação e uma camada opcional de IA.
 
-## O que entra na Alpha 8
+O princípio continua simples:
 
-- **Perguntar aos números:** respostas locais e auditáveis para saldos, limites, transferências por pessoa, rankings de remetentes e destinatários, primeiro uso de Wise/Revolut, custos explícitos de câmbio e gasto líquido por comerciante;
-- **História Financeira:** linha do tempo derivada do extrato com início de uso de instituições, mudança da instituição dominante, troca da principal origem de transferências recebidas, despesas muito acima do padrão, primeira conversão e primeira posição de saldo confirmada;
-- **Panorama mensal:** entradas e saídas externas, compras, transferências entre pessoas, taxas e volume de movimentos por mês, sem misturar consumo com dinheiro apenas movimentado;
-- **Inteligência por relacionamento:** participação nos envios e recebimentos, médias, cadência, meses de maior movimento e insights automáticos sem exigir preenchimento;
-- **Anotações realmente opcionais:** uma nota pode enriquecer o relacionamento, mas não cria pendência, não classifica todas as transferências e não altera saldo;
-- **Analista por IA opcional:** panorama, explicações e hipóteses em linguagem natural usando um contexto estruturado, sem CSV bruto, sem ferramenta web e sem permissão para calcular ou alterar fatos;
-- **Auditoria inteligente separada:** a pesquisa externa continua restrita a comerciantes e instituições públicas; pessoas particulares não são pesquisadas;
-- **Privacidade por arquitetura:** a chave da OpenAI permanece exclusivamente no servidor Vercel e as chamadas usam `store: false`;
-- **Sem nova migration:** o estado permanece em `schemaVersion: 13`, porque história, inteligência e contexto da IA são derivados do livro já existente.
+> O extrato bancário é a fonte dos fatos. Regras, memória e IA apenas organizam, explicam e levantam hipóteses.
 
-## Regra permanente
+## O que entrou
 
-```text
-Extrato bancário → fatos imutáveis → cálculos determinísticos → relacionamentos e eventos → interpretação opcional da IA
-```
+1. **Motor de conhecimento** — grafo derivado de contas, instituições, pessoas, comerciantes, categorias e objetos financeiros.
+2. **Motor de explicação** — cálculos importantes mostram fórmula, escopo, movimentos incluídos, exclusões, evidências e confiança.
+3. **Qualidade dos dados** — score geral, dimensões e qualidade por conta.
+4. **Auditoria contínua** — duplicatas, tipos desconhecidos, regras conflitantes, conversões incompletas, reembolsos sem vínculo e transferências internas sugeridas.
+5. **História financeira ampliada** — mudanças observáveis, recorrências e objetos aparecem na timeline.
+6. **Insights contextuais** — mudanças, impacto, consequência e evidências, sem transformar percentuais óbvios em poesia corporativa.
+7. **Memória comportamental** — renda típica, faixa de gastos, relações e comerciantes recorrentes podem ser confirmados ou ignorados.
+8. **Detecção de mudanças** — comparação entre períodos equivalentes de 30 dias, por consumo, renda, pessoa, comerciante e recorrência.
+9. **Objetos financeiros** — assinatura, empréstimo, apoio familiar, viagem, compra grande, meta, reserva, compromisso e projeto.
+10. **Eventos compostos** — conversão, taxa, transferência interna e compra/reembolso aparecem como acontecimentos ligados, sem apagar as linhas bancárias.
+11. **Onboarding e importação guiada** — explicação do fluxo antes da primeira importação e prévia obrigatória.
+12. **Segurança visível** — sessão, cofre remoto, isolamento, sincronização e estado da IA são exibidos sem promessas impossíveis.
+13. **Recuperação de desastre** — backups JSON e checkpoints locais comprimidos, com migração e restauração validadas.
+14. **Interface adaptativa** — novas páginas roláveis, safe area, teclado do iPhone, modais e cartões responsivos.
+15. **IA opcional e subordinada** — recebe um panorama já calculado; não lê CSV bruto, não altera o estado e não vira contadora por entusiasmo.
 
-A IA pode explicar, resumir e levantar hipóteses. Ela nunca é a fonte oficial de saldo, data, valor, moeda, reconciliação ou classificação técnica. A ausência de chave da OpenAI desativa apenas as funções de interpretação; todo o restante continua funcionando.
+## Estado e migração
 
----
+- Versão do aplicativo: `0.9.0-alpha.9`
+- Estado persistido: `schemaVersion: 15`
+- Backups schema 14 são migrados automaticamente.
+- Não há migration SQL nova nesta entrega.
+- Objetos financeiros, memória comportamental e onboarding ficam no JSONB já existente.
 
-## Base herdada da Alpha 7 — Relationship Engine
+## Navegação
 
-A Alpha 7 remove o principal trabalho manual que ainda restava: transferências entre pessoas não precisam mais de categoria nem finalidade para serem consideradas corretas. O aplicativo reconhece a contraparte, soma quanto foi enviado e recebido e constrói um mapa de relacionamentos financeiros. Contexto pessoal continua disponível, mas é um enriquecimento opcional, nunca uma pendência.
-
-## Fundamentos da Alpha 7
-
-- transferências recebidas e enviadas ficam tecnicamente completas assim que a contraparte é reconhecida;
-- ausência de categoria, finalidade ou contexto em transferência não cria revisão, alerta nem período provisório;
-- compras, taxas e outras despesas continuam usando categorias; transferências para pessoas ficam fora dos gráficos de despesas e dos padrões de consumo;
-- novo painel **Relacionamentos Financeiros**, com maiores destinatários, maiores remetentes, total enviado, recebido, saldo da relação, histórico e busca;
-- nomes abreviados e completos podem ser consolidados de forma conservadora, preservando todos os aliases bancários;
-- contexto opcional é salvo no relacionamento e pode valer para todas as aparições da pessoa, sem editar linha por linha;
-- a Home mostra os principais relacionamentos diretamente do extrato;
-- a revisão mostra somente problemas que afetam números, vínculos internos ou despesas categorizáveis;
-- o diagnóstico e a auditoria inteligente deixam de tratar pessoa sem contexto como falha;
-- insights de compras, comerciantes, dias e horários excluem transferências entre pessoas;
-- séries recorrentes detalhadas são deduplicadas antes de anualizar, evitando multiplicar o mesmo compromisso pelo histórico inteiro;
-- clicar num relacionamento abre exatamente as movimentações que o compõem, inclusive quando o banco usou variações do nome.
-
-O estado passa para `schemaVersion: 13`. Backups schema 12 são migrados automaticamente. A migração remove apenas razões antigas de revisão de transferências e preserva valores, fatos bancários, contexto já salvo e decisões manuais. Não há migration SQL nova do Supabase.
-
-## Princípio do produto
-
-```text
-Fato bancário → tipo técnico → contraparte → relacionamento → contexto opcional → insight
-```
-
-O aplicativo não exige uma explicação que não seja necessária para saldo, fluxo ou análise. Uma transferência para Hannah já é uma transferência para Hannah. “Empréstimo”, “assinaturas compartilhadas” ou outro contexto podem ser acrescentados depois, quando realmente forem úteis.
-
----
-
-## Base herdada da Alpha 6 — Fidelidade bancária, contexto e auditoria
-
-A Alpha 6 reorganiza o aplicativo para que o extrato seja a fonte dos fatos e toda interpretação fique numa camada auditável. O objetivo não é apenas classificar lançamentos, mas responder de onde cada número veio, o que ainda é incerto e quais correções podem ser aplicadas sem alterar decisões manuais.
-
-### Fundamentos da Alpha 6
-
-- livros bancários separados por instituição, moeda e produto, incluindo Revolut Atual, Revolut Poupanças, Wise Conta principal e movimentos de Rende+;
-- ciclo de vida completo das movimentações: pendente, concluída, revertida e enriquecida por reimportação;
-- importação idempotente que atualiza fatos bancários existentes sem duplicá-los e sem apagar classificação manual;
-- reconhecimento determinístico de `Wise Charges for:` e movimentos para/de Rende+;
-- eventos compostos que ligam conversão, taxa e pontas relacionadas sem apagar as linhas originais;
-- cartão **Hoje** separado em fluxo externo concluído, pendentes, transferências internas, conversões e taxas, com acesso às linhas que formaram cada total;
-- distinção explícita entre saldo zero, não informado, estimado e confirmado por posição de extrato;
-- revisão dividida em correções obrigatórias, vínculos, contexto e organização opcional;
-- descrições humanas na interface com preservação integral da descrição bancária original;
-- gerenciamento de contas com renomear, arquivar, reativar, excluir conta vazia e mesclar com prévia;
-- Memória Financeira para pessoas, comerciantes e papéis válidos por período;
-- Saúde da Base com verificações concretas, sem esconder erro grave atrás de uma porcentagem bonita;
-- Auditoria por IA opcional: a IA propõe ações estruturadas e o motor determinístico valida, confirma, aplica e permite desfazer;
-- pesquisa externa opcional limitada a empresas, comerciantes, instituições e documentação pública. Pessoas particulares nunca são pesquisadas.
-
-O estado passa para `schemaVersion: 12`. Backups schema 11 são migrados automaticamente. Os dados continuam no snapshot JSONB existente, portanto esta entrega não exige uma migration SQL nova do Supabase.
+- **Início** — posição, Hoje, dinheiro livre e visão diária.
+- **Movimentos** — fatos bancários, filtros e detalhes auditáveis.
+- **Planejar** — compromissos, reserva e projeções.
+- **Insights** — análises, História Financeira, Perguntar aos Números, Central de Compreensão e IA opcional.
+- **Mais** — contas, revisão, saúde da base, relacionamentos, segurança e recuperação.
 
 ## OpenAI opcional
 
-A aplicação funciona sem IA. Para habilitar **Auditoria Inteligente**, configure no ambiente do servidor Vercel:
+O aplicativo financeiro funciona sem chave da OpenAI. Para habilitar os recursos explicitamente marcados como IA, configure no Vercel:
 
 ```text
 OPENAI_API_KEY=...
 OPENAI_FINANCIAL_MODEL=gpt-5.6-luna
+```
+
+A chave permanece nas rotas de servidor em `api/`. Não use prefixo `VITE_` para segredos.
+
+## Variáveis essenciais
+
+```text
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_PUBLISHABLE_KEY=...
 SUPABASE_URL=...
 SUPABASE_PUBLISHABLE_KEY=...
 ```
 
-A chave da OpenAI nunca deve usar prefixo `VITE_`, porque variáveis `VITE_*` são expostas ao navegador. O frontend envia um panorama estruturado para `/api/financial-audit`; a rota verifica a sessão Supabase e chama a Responses API no servidor. A pesquisa web só é habilitada quando o usuário marca explicitamente a opção correspondente.
+Consulte `.env.example` e `VERCEL_DEPLOY.md`.
 
-A API não recebe o CSV bruto por padrão e não altera valores, datas, moedas ou saldos. Ela devolve propostas com evidências. O aplicativo faz a prévia e exige confirmação antes de qualquer alteração.
+## Validação executada nesta entrega
 
+- compilação TypeScript estrita do núcleo financeiro e das migrações;
+- typecheck estrutural de toda a aplicação com declarações temporárias de dependências;
+- verificadores de arquitetura, sincronização, segurança e PWA;
+- migração do backup real schema 14 para 15, preservando 994 movimentos e 5 contas;
+- smoke test dos novos motores sobre o backup real;
+- checkpoint comprimido criado e restaurado com as 994 movimentações.
 
-Web app financeiro pessoal orientado a decisões. Ele não serve apenas para dizer quanto entrou e saiu. A proposta é responder, com dados verificáveis:
-
-- **Como está meu dinheiro hoje?**
-- **Quanto posso gastar sem atingir minha reserva?**
-- **O que mudou no meu comportamento financeiro?**
-- **Quais movimentações ainda precisam da minha ajuda?**
-
-A Alpha 5 mantém a análise local e determinística sobre o motor financeiro existente. Não há dependência de IA ou API paga para calcular saldo, previsão ou descobertas.
-
-
-
-## Saldo, contas e decisões v0.9 Alpha 5
-
-A Alpha 5 transforma o histórico em posição financeira operacional sem esconder a qualidade dos dados:
-
-- card de saldo atual com estado **confirmado**, **estimado**, **desatualizado** ou **incompleto**;
-- posição consolidada por moeda, com Revolut, Wise e cada conta preservadas separadamente;
-- ponte auditável entre saldo reconciliado, fluxo externo, movimentos internos, conversões, taxas e ajustes;
-- dinheiro realmente livre após compromissos futuros e reserva mínima;
-- limite diário seguro até a próxima receita;
-- shell estático de PWA no iPhone: cabeçalho e barra inferior fixos, conteúdo central rolável e safe areas;
-- nova área **Planejar**, separada da Home;
-- detecção de pares entre contas próprias, com confirmação humana antes de excluir do fluxo;
-- filtros por instituição e conta, sem apagar a origem Wise/Revolut;
-- painel de moedas, taxas explícitas, volume convertido e câmbio efetivo quando as duas pontas estão vinculadas;
-- detalhamento de transferências por finalidade, categoria, pessoa, recorrência e observação;
-- divisão de uma transferência em vários itens, cuja soma precisa fechar exatamente com o fato bancário;
-- assinaturas compartilhadas e outros itens recorrentes podem virar compromissos futuros;
-- Descobertas separadas em **Agora**, **Oportunidades** e **Padrões**, com impacto e ação quando os dados sustentam a conclusão;
-- painel de integridade que informa desde quando há histórico, saldo incompleto, pendências, conversões sem par e transferências internas sugeridas;
-- proteção global contra falha de renderização, mutações de categoria protegidas e botões com tipo explícito para evitar envios acidentais de formulários.
-
-O estado passa para `schemaVersion: 9`. Backups schema 8 são migrados automaticamente, inicializando os novos detalhamentos e decisões sem alterar os fatos bancários existentes.
-
-
-## Histórico e explicabilidade v0.9 Alpha 4
-
-- busca por descrição, comerciante, nota e identificador bancário;
-- filtros por conta, categoria, período, valor, direção, tipo técnico, origem e pendência;
-- regras de classificação em massa com prévia, preservação de escolhas manuais e desfazer;
-- comparação entre o período atual e o período anterior equivalente;
-- explicações determinísticas para as principais variações;
-- linha do tempo derivada de importações, reconciliações, classificações e planejamentos;
-- exportação CSV exatamente do conjunto filtrado na tela.
-
-A Alpha 4 não altera o schema persistido. As novas análises e a linha do tempo são derivadas do estado auditável já existente.
-
-## Classificação v0.9 Alpha 3
-
-A camada de classificação foi reorganizada para impedir que o banco, a categoria financeira e a revisão manual disputem o mesmo campo como três pessoas tentando dirigir o mesmo carro.
-
-Fluxo atual:
-
-```text
-CSV → normalização → identificação técnica → agrupamento → sugestões → revisão → regras → insights
-```
-
-Principais mudanças:
-
-- `technicalType` guarda o fato bancário: salário, cartão, saque, débito direto, transferência recebida ou enviada, transferência interna, conversão, reembolso e outros;
-- `kind` permanece como natureza financeira ampla, sem substituir o tipo técnico;
-- `categoryId` é opcional e o aplicativo funciona com movimentações sem categoria;
-- transferências externas entram no fluxo pela direção; apenas transferências internas e conversões ficam fora de receitas e despesas;
-- movimentações são agrupadas por comerciante, moeda, direção e tipo técnico;
-- sugestões informam confiança, explicação e evidências;
-- a revisão permite aplicação em massa, exceções individuais, “manter sem categoria” e “resolver depois”;
-- regras aprendidas possuem escopo técnico e aceitam exceções;
-- decisões de revisão são registradas e podem ser desfeitas;
-- grupos sem categoria melhoram gráficos e insights, mas não tornam o fluxo financeiro inválido;
-- o estado usa `schemaVersion: 8`, com migração automática das versões anteriores.
-
-## Correções de auditoria da Alpha 3
-
-- “Todos” agora representa o histórico completo tanto na lista quanto nos indicadores;
-- o fluxo mostra seu intervalo exato e não usa mais a expressão ambígua “O que sobrou”;
-- taxas adicionais do Revolut são fatos financeiros separados do movimento principal, sem duplicar formatos já líquidos;
-- operações revertidas têm efeito líquido zero;
-- `Atual` e `Poupanças` são reconciliados como livros distintos;
-- pendências fora do intervalo não rebaixam a confiança do período atual;
-- “Sem categoria” é exibido em português, embora a chave analítica interna continue estável.
-
-## Principais novidades da v0.8
-
-### Home orientada a decisões
-
-- posição reconciliada por moeda;
-- limite seguro calculado pelo motor financeiro;
-- próximo compromisso planejado;
-- fluxo do período separado do saldo da conta;
-- resultado provisório quando existem pendências;
-- explicação de como cada número foi calculado;
-- três descobertas priorizadas em vez de um mural de gráficos decorativos.
-
-### Motor de Insights
-
-O módulo `src/insights` recebe métricas estruturadas e gera análises auditáveis, com prioridade, confiança, evidências e deduplicação.
-
-Entre as famílias implementadas estão:
-
-- aumento ou redução das despesas;
-- mudanças por categoria;
-- concentração por categoria e comerciante;
-- dias e horários de maior gasto;
-- maior transação e variação do ticket médio;
-- sequência de dias sem despesas variáveis;
-- comportamento após entradas;
-- assinaturas recorrentes;
-- evolução da posição reconciliada e da reserva;
-- pressão dos compromissos futuros;
-- qualidade e cobertura dos dados;
-- combinações cuidadosas de fatos, sem afirmar causalidade que os dados não provam.
-
-Cada descoberta pode mostrar a base utilizada, por exemplo: período atual, período anterior, número de transações e valores comparados.
-
-### Descobertas
-
-A nova tela reúne análises relevantes e permite:
-
-- abrir a evidência de cada cálculo;
-- navegar para os movimentos envolvidos;
-- dispensar um insight por 30 dias;
-- marcar a análise como útil ou não útil.
-
-### Categorias amplas e personalizadas
-
-A versão inclui categorias padrão como Mercado, Alimentação, Compras, Transporte, Assinaturas, Moradia, Lazer, Saúde, Família, Educação, Música, Trabalho e Outros.
-
-Também é possível:
-
-- criar categorias próprias;
-- renomear;
-- arquivar e restaurar;
-- manter o histórico das transações ligadas a uma categoria arquivada.
-
-As análises são genéricas. Uma categoria criada pelo usuário passa a participar automaticamente dos filtros, resumos e insights, sem exigir uma regra especial escrita à mão.
-
-### Aprendizado de comerciantes
-
-Quando o usuário corrige uma classificação, o app pode guardar uma regra pessoal para o comerciante:
-
-```text
-Vinted → Compras
-Spotify → Assinaturas
-Irish Rail → Transporte
-```
-
-Variações do nome são normalizadas antes da aplicação da regra. Movimentações duvidosas continuam pedindo confirmação, em vez de o software inventar uma certeza com a serenidade típica de computadores e consultores.
-
-### Importação Revolut revisada
-
-- carregamentos e levantamentos de subconta reconhecidos como transferências internas;
-- carregamentos próprios reconhecidos como transferência, não renda;
-- devoluções de cartão reconhecidas como reembolso;
-- resumo da prévia mostra classificadas automaticamente, transferências, reembolsos e itens que precisam de ajuda;
-- movimentos recentes são exibidos do mais novo para o mais antigo;
-- transferências externas contam como entradas ou saídas de caixa;
-- transferências internas e conversões não contaminam receitas e despesas.
-
-## Arquitetura da análise
-
-```text
-Estado financeiro validado
-        ↓
-Métricas derivadas
-        ↓
-Famílias de regras
-        ↓
-Validação de amostra e confiança
-        ↓
-Prioridade, deduplicação e cooldown
-        ↓
-Templates de linguagem
-        ↓
-Home e Descobertas
-```
-
-O motor de insights não altera saldos, previsões, reservas ou movimentações. Ele apenas lê os resultados do núcleo financeiro e os explica.
-
-## Persistência e migração
-
-- a v0.8 introduziu `schemaVersion: 5`; a Alpha 1 usou a versão 6, a Alpha 2 a versão 7 e a Alpha 3 migrou o estado para `schemaVersion: 8` e a Alpha 5 usa `schemaVersion: 9`;
-- migração automática dos estados v2, v3 e v4;
-- categorias antigas `clothing` e `games` são remapeadas para `shopping`;
-- contas e categorias personalizadas existentes são preservadas;
-- regras pessoais de comerciantes e feedback dos insights são salvos no mesmo estado JSONB.
-
-**Não é necessário trocar chaves, criar outro projeto, refazer autenticação ou aplicar uma migration nova no Supabase para esta versão.** A coluna existente de versão do estado aceita o novo número e o conteúdo continua no snapshot JSONB já usado pelo app.
-
-## Atualizar o mesmo repositório
-
-Trabalhe em uma branch para manter a versão publicada intacta enquanto a prévia da Vercel compila:
-
-```bash
-git checkout -b feature/insight-engine
-# copie os arquivos desta entrega sobre o projeto atual
-git add .
-git commit -m "Adiciona motor de insights e nova experiência"
-git push -u origin feature/insight-engine
-```
-
-Depois de validar a prévia, faça o merge para a branch ligada à produção. Não crie outro repositório e não altere as variáveis existentes da Vercel ou do Supabase.
-
-## Rodar localmente
-
-```bash
-npm install
-npm test
-npm run build
-npm run dev
-```
-
-O projeto exige Node 22.
-
-## Verificações desta entrega
-
-A Alpha 3 foi revisada sem executar npm, Vitest, build Vite, Supabase ou E2E.
-
-Foram realizados:
-
-- transpilação sintática de 54 arquivos TypeScript/TSX, com 0 diagnósticos;
-- verificação estrita dos módulos internos de domínio, persistência, CSV, classificação, finanças, métricas e insights;
-- busca estática por construções antigas sem `technicalType` ou `categoryReviewStatus`;
-- revisão da migração v6 → v7;
-- revisão do tratamento de transferências externas, internas e conversões no fluxo financeiro.
-
-Essa validação confirma a consistência estática da implementação, mas não substitui a prévia no ambiente normal do projeto.
-
-## Arquivos de referência
-
-- `V0.8_INSIGHTS_IMPLEMENTATION_REPORT.md`
-- `CLASSIFICATION_ALPHA2_REPORT.md`
-- `CHANGELOG.md`
-- `SUPABASE_SETUP.md`
-- `VERCEL_DEPLOY.md`
-- `PWA_IPHONE.md`
+Não foram executados npm, Vitest, Vite build, navegador real, Supabase remoto, Vercel real nem chamada real à OpenAI. O deploy continua sendo a validação final da interface e do bundle com as dependências reais.

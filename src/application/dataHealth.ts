@@ -12,12 +12,32 @@ export interface HealthCheck {
   accountIds?: string[];
 }
 
+export interface DataQualityDimension {
+  id: 'integrity' | 'coverage' | 'reconciliation' | 'classification' | 'recovery';
+  label: string;
+  score: number;
+  detail: string;
+}
+
+export interface AccountDataQuality {
+  accountId: string;
+  score: number;
+  confidence: 'confirmed' | 'usable' | 'limited';
+  firstDate?: string;
+  lastDate?: string;
+  transactionCount: number;
+  issues: string[];
+}
+
 export interface DataHealthReport {
   score: number;
   confidenceLabel: string;
+  reportConfidence: 'confirmed' | 'usable' | 'limited';
   criticalCount: number;
   warningCount: number;
   checks: HealthCheck[];
+  dimensions: DataQualityDimension[];
+  accountQuality: AccountDataQuality[];
   generatedAt: string;
 }
 
@@ -131,7 +151,45 @@ export function buildDataHealthReport(state: AppState): DataHealthReport {
   const penalty = criticalCount * 22 + warningCount * 8;
   const score = Math.max(0, Math.min(100, 100 - penalty));
   const confidenceLabel = criticalCount ? 'Base precisa de correção' : warningCount ? 'Base utilizável com ressalvas' : 'Base consistente';
-  return { score, confidenceLabel, criticalCount, warningCount, checks, generatedAt: new Date().toISOString() };
+
+  const integrityPenalty = (duplicates.length + mismatchedFees.length + unresolvedImport.length) * 18;
+  const coveragePenalty = accountsMissingPosition.length * 12 + pending.length * 2;
+  const conversionCount = compounds.filter((item) => item.kind === 'conversion').length;
+  const incompleteConversionRatio = conversionCount ? incompleteConversions.length / conversionCount : 0;
+  const reconciliationPenalty = accountsMissingPosition.length * 20 + Math.round(incompleteConversionRatio * 60);
+  const classificationPenalty = unknown.length * 6 + optionalGroups.length;
+  const recoveryPenalty = lastBackup ? 0 : 30;
+  const dimensions: DataQualityDimension[] = [
+    { id: 'integrity', label: 'Integridade', score: Math.max(0, 100 - integrityPenalty), detail: 'Duplicatas fortes, taxas incompatíveis e problemas obrigatórios de importação.' },
+    { id: 'coverage', label: 'Cobertura', score: Math.max(0, 100 - coveragePenalty), detail: 'Até onde os extratos e posições cobrem as contas ativas.' },
+    { id: 'reconciliation', label: 'Reconciliação', score: Math.max(0, 100 - reconciliationPenalty), detail: 'Posições confirmadas e eventos com as duas pontas observadas.' },
+    { id: 'classification', label: 'Compreensão técnica', score: Math.max(0, 100 - classificationPenalty), detail: 'Natureza bancária conhecida; categorias opcionais pesam pouco.' },
+    { id: 'recovery', label: 'Recuperação', score: Math.max(0, 100 - recoveryPenalty), detail: 'Registro de backup exportado e capacidade de voltar a um estado anterior.' },
+  ];
+
+  const accountQuality: AccountDataQuality[] = state.accounts.filter((account) => account.active).map((account) => {
+    const rows = activeTransactions.filter((item) => item.accountId === account.id);
+    const issues: string[] = [];
+    const hasPosition = state.balanceSnapshots.some((snapshot) => snapshot.accountId === account.id && snapshot.reconciled);
+    const accountUnknown = rows.filter((item) => item.status === 'completed' && item.technicalType === 'unknown').length;
+    const accountImportIssues = unresolvedImport.filter((issue) => issue.accountId === account.id).length;
+    if (!hasPosition) issues.push('Sem posição reconciliada');
+    if (accountUnknown) issues.push(`${accountUnknown} tipo(s) técnico(s) desconhecido(s)`);
+    if (accountImportIssues) issues.push(`${accountImportIssues} problema(s) de importação`);
+    const accountScore = Math.max(0, 100 - (hasPosition ? 0 : 25) - accountUnknown * 8 - accountImportIssues * 20);
+    const dates = rows.map((item) => item.reportingDate).sort();
+    return {
+      accountId: account.id,
+      score: accountScore,
+      confidence: accountScore >= 90 ? 'confirmed' : accountScore >= 65 ? 'usable' : 'limited',
+      firstDate: dates[0],
+      lastDate: dates.at(-1),
+      transactionCount: rows.length,
+      issues,
+    };
+  });
+  const reportConfidence = criticalCount || score < 60 ? 'limited' : warningCount ? 'usable' : 'confirmed';
+  return { score, confidenceLabel, reportConfidence, criticalCount, warningCount, checks, dimensions, accountQuality, generatedAt: new Date().toISOString() };
 }
 
 export function severityForHealthCheck(check: HealthCheck): AuditIssueSeverity {

@@ -1,8 +1,9 @@
 import type { AppState, Institution, Transaction } from '../core/types';
 import { signedNetMovement } from '../core/finance';
 import { buildFinancialRelationships } from './financialRelationships';
+import { buildChangeSignals } from './changeDetection';
 
-export type FinancialHistoryEventType = 'account' | 'relationship' | 'spending' | 'income' | 'conversion' | 'position';
+export type FinancialHistoryEventType = 'account' | 'relationship' | 'spending' | 'income' | 'conversion' | 'position' | 'recurrence' | 'object';
 
 export interface FinancialHistoryEvent {
   id: string;
@@ -168,6 +169,39 @@ export function buildFinancialHistory(state: AppState, currency: string): Financ
       transactionIds: [firstConversion.id],
       accountIds: [firstConversion.accountId],
       importance: 62,
+    });
+  }
+
+  for (const signal of buildChangeSignals(state, currency)) {
+    const date = signal.transactionIds.map((id) => rows.find((row) => row.id === id)?.reportingDate).filter((value): value is string => Boolean(value)).sort().at(-1) ?? rows.at(-1)!.reportingDate;
+    events.push({
+      id: `change-signal:${signal.id}`,
+      date,
+      month: date.slice(0, 7),
+      type: signal.type === 'recurrence' ? 'recurrence' : signal.type === 'income' ? 'income' : signal.type === 'relationship' ? 'relationship' : signal.type === 'account' ? 'account' : 'spending',
+      title: signal.title,
+      detail: signal.explanation,
+      evidence: signal.evidence,
+      transactionIds: signal.transactionIds,
+      accountIds: [...new Set(signal.transactionIds.map((id) => rows.find((row) => row.id === id)?.accountId).filter((value): value is string => Boolean(value)))],
+      importance: signal.actionable ? 92 : 74,
+    });
+  }
+
+  for (const object of state.financialObjects.filter((item) => item.currency === currency)) {
+    const linkedDates = object.transactionIds.map((id) => rows.find((row) => row.id === id)?.reportingDate).filter((value): value is string => Boolean(value)).sort();
+    const date = object.startDate ?? linkedDates[0] ?? object.createdAt.slice(0, 10);
+    events.push({
+      id: `financial-object:${object.id}`,
+      date,
+      month: date.slice(0, 7),
+      type: 'object',
+      title: `${object.title} entrou na sua história financeira`,
+      detail: `Objeto ${object.type.replaceAll('_', ' ')} com ${object.transactionIds.length} movimento(s) e ${object.plannedEventIds.length} compromisso(s) vinculados.`,
+      evidence: [object.source === 'manual' ? 'Contexto criado manualmente.' : 'Contexto confirmado a partir de uma sugestão.'],
+      transactionIds: object.transactionIds,
+      accountIds: [...new Set(object.transactionIds.map((id) => rows.find((row) => row.id === id)?.accountId).filter((value): value is string => Boolean(value)))],
+      importance: 68,
     });
   }
 

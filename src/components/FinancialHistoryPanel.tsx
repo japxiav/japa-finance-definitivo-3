@@ -1,4 +1,4 @@
-import { ArrowLeftRight, CalendarClock, ChevronRight, Landmark, ReceiptText, WalletCards } from 'lucide-react';
+import { ArrowLeftRight, CalendarClock, ChevronRight, Landmark, Layers3, ReceiptText, Repeat2, WalletCards } from 'lucide-react';
 import { formatMoney } from '../core/money';
 import type { FinancialHistoryEvent, MonthlyFinancialStory } from '../application/financialHistory';
 
@@ -7,6 +7,8 @@ function icon(type: FinancialHistoryEvent['type']) {
   if (type === 'relationship') return <ArrowLeftRight size={18}/>;
   if (type === 'spending') return <ReceiptText size={18}/>;
   if (type === 'position') return <WalletCards size={18}/>;
+  if (type === 'recurrence') return <Repeat2 size={18}/>;
+  if (type === 'object') return <Layers3 size={18}/>;
   return <CalendarClock size={18}/>;
 }
 
